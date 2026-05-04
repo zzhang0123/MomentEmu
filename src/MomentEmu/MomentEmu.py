@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import warnings
+from typing import Any
 
 import numpy as np
 
@@ -221,25 +224,28 @@ def select_best_model(rmse_list, aic_list=None, bic_list=None, rmse_tol=0.05):
 
 ####### Signal-mask aware fractional error #######
 def signal_aware_frac_err(
-    pred,
-    ref,
+    pred: np.ndarray,
+    ref: np.ndarray,
     *,
-    signal_floor_frac=1e-3,
-    absolute_floor=1e-15,
-    dr_threshold_decades=3.0,
-    per_output=True,
-):
+    signal_floor_frac: float = 1e-3,
+    absolute_floor: float = 1e-15,
+    dr_threshold_decades: float = 3.0,
+    per_output: bool = True,
+) -> dict[str, Any]:
     """Signal-mask aware fractional-error diagnostic for emulator validation.
 
     Robustly compares a prediction to a reference whose entries may span many
     orders of magnitude. Naive ``|diff| / |ref|`` is undefined when ``|ref|``
-    is at the floating-point noise floor; this helper masks out such entries
-    when the per-output dynamic range exceeds ``dr_threshold_decades``, and
-    falls back to a plain relative-error gate (with a small absolute floor)
-    for low-dynamic-range outputs.
+    is at the floating-point noise floor. This helper computes a per-output
+    signal floor of ``max(signal_floor_frac * peak, absolute_floor)`` and
+    excludes below-floor entries from every fractional-error reduction
+    (``max_rel`` and ``rmse``). Per-output dynamic range is measured and
+    reported via ``dr_decades`` and ``strategy`` for diagnostics, but does
+    not change the masking formula — see the ``dr_threshold_decades``
+    parameter below.
 
-    See ``signal_mask.md`` (repository root) for the full rationale and
-    calibration guidance.
+    See ``signal_mask.md`` (repository root) for the full rationale,
+    calibration anchors, and failure modes.
 
     Parameters
     ----------
@@ -250,18 +256,19 @@ def signal_aware_frac_err(
         Mask floor as a fraction of the per-output peak amplitude. Entries
         whose magnitude is below ``signal_floor_frac * |ref|.max()`` (along
         the per-output axis) are treated as floating-point noise and excluded
-        from the fractional-error reduction.
+        from the fractional-error reduction. ``0`` disables the mask and
+        emits a ``UserWarning``.
     absolute_floor : float, default 1e-15
         Hard lower bound on the floor; defends against fixtures where the
-        whole reference is at FP noise level.
+        whole reference is at FP noise level. ``1e-15`` ≈ float64 ULP.
     dr_threshold_decades : float, default 3.0
         Diagnostic threshold on per-output dynamic range. Outputs whose
         dynamic range exceeds this value are tagged with strategy
         ``"signal_mask"``; the rest are tagged ``"plain_rel"``. The floor
-        formula is identical on both branches —
-        ``max(signal_floor_frac * peak, absolute_floor)`` (signal_mask.md
-        lines 62-63) — so this parameter controls the diagnostic *label*
-        only, not the masking behaviour.
+        formula is identical on both branches
+        (``max(signal_floor_frac * peak, absolute_floor)``,
+        ``signal_mask.md`` lines 62-63) — this parameter controls the
+        diagnostic *label* only, not the masking behaviour.
     per_output : bool, default True
         If True and ``ref`` is 2D, the dynamic-range detection and mask are
         applied per output column. If False (or ``ref`` is 1D), the whole
@@ -270,18 +277,84 @@ def signal_aware_frac_err(
     Returns
     -------
     dict
-        Diagnostic-rich dict with keys:
+        Diagnostic-rich dict with the following keys. The shape of
+        ``floor``, ``dr_decades`` and ``strategy`` depends on
+        ``per_output``: in per-output mode they are arrays of shape
+        ``(n_outputs,)``; in scalar mode (``per_output=False`` or 1D
+        ``ref``) they collapse to Python ``float`` / ``str``.
 
-        - ``max_rel`` : worst in-mask relative error across all outputs
-        - ``rmse`` : root-mean-square fractional error across in-mask entries
-        - ``n_above`` : total number of entries above the signal floor
-        - ``n_total`` : total number of entries
-        - ``floor`` : per-output (or scalar) floor used
-        - ``dr_decades`` : per-output (or scalar) dynamic range estimate
-        - ``strategy`` : per-output (or scalar) label, ``"signal_mask"`` or
-          ``"plain_rel"``
-        - ``argmax`` : index (tuple) of the worst in-mask entry, or ``None``
-          when no entry is above the floor
+        - ``max_rel`` (float): worst in-mask relative error across all
+          outputs. ``nan`` when the mask is empty.
+        - ``rmse`` (float): root-mean-square fractional error across
+          in-mask entries. ``nan`` when the mask is empty.
+        - ``n_above`` (int): number of entries above the signal floor.
+        - ``n_total`` (int): total number of entries in ``ref``.
+        - ``floor`` (float or ndarray): per-output (or scalar) floor
+          actually used.
+        - ``dr_decades`` (float or ndarray): per-output (or scalar)
+          dynamic range estimate, ``log10(peak / min_positive)``. ``0``
+          for all-zero columns.
+        - ``strategy`` (str or ndarray): per-output (or scalar) label,
+          ``"signal_mask"`` if the column's dynamic range exceeds
+          ``dr_threshold_decades``, else ``"plain_rel"``. Diagnostic
+          only — does not affect the floor.
+        - ``argmax`` (tuple of int or None): index of the worst in-mask
+          entry. ``None`` in two cases: ``n_above == 0`` (mask is empty),
+          or ``max_rel == 0.0`` (every in-mask entry matched exactly).
+
+    Raises
+    ------
+    ValueError
+        If ``pred`` and ``ref`` have mismatched shapes, or any of
+        ``signal_floor_frac``, ``absolute_floor``,
+        ``dr_threshold_decades`` is negative.
+
+    Warns
+    -----
+    UserWarning
+        If ``signal_floor_frac == 0``: the mask degrades to
+        ``absolute_floor`` for every output, effectively disabling the
+        signal-aware behaviour.
+
+    See Also
+    --------
+    PolyEmu : sets ``forward_frac_err_diag`` / ``backward_frac_err_diag``
+        on the emulator instance using this helper when
+        ``return_max_frac_err=True``.
+
+    Notes
+    -----
+    The default ``signal_floor_frac=1e-3`` preserves entries that
+    contribute ≥ 0.1 % to any aggregated downstream quantity. For
+    near-strict relative-error gates with narrow dynamic range, lower it
+    to ``1e-6`` or ``1e-9``. For wide-dynamic-range outputs where
+    deep-tail entries are floating-point noise (e.g. ``1e-7`` to
+    ``1e-24`` spans), the default is appropriate. See
+    ``signal_mask.md`` § "The two parameters explained" for the
+    calibration discussion.
+
+    Examples
+    --------
+    Typical emulator-validation gate:
+
+    >>> import numpy as np
+    >>> from MomentEmu import signal_aware_frac_err
+    >>> rng = np.random.default_rng(0)
+    >>> ref = rng.uniform(1.0, 10.0, (100, 4))
+    >>> pred = ref * (1.0 + 1e-9 * rng.standard_normal(ref.shape))
+    >>> diag = signal_aware_frac_err(pred, ref)
+    >>> diag["n_above"] > 0  # mask is non-empty
+    True
+    >>> diag["max_rel"] < 1e-7  # gate the worst in-mask entry
+    True
+
+    Branch-safely on the empty-mask case before reading ``argmax`` /
+    ``max_rel`` for a log message:
+
+    >>> if diag["n_above"] == 0:
+    ...     print("signal mask is empty; check fixture for FP-noise output")
+    ... elif diag["max_rel"] > 1e-7:
+    ...     print(f"max rel err {diag['max_rel']:.2e} at {diag['argmax']}")
     """
     pred = np.asarray(pred)
     ref = np.asarray(ref)

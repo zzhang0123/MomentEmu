@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 from itertools import combinations_with_replacement
 from collections import Counter
@@ -360,7 +362,16 @@ def _report_frac_err(
 
 
 class PolyEmu():
-    def __init__(self, 
+    # Validation diagnostics, populated only when return_max_frac_err=True.
+    # Class-level defaults make these attributes safe to read unconditionally
+    # (returns None instead of AttributeError when the diagnostic was not
+    # requested at construction time).
+    forward_max_frac_err: float | None = None
+    backward_max_frac_err: float | None = None
+    forward_frac_err_diag: dict | None = None
+    backward_frac_err_diag: dict | None = None
+
+    def __init__(self,
                 X, 
                 Y, 
                 X_test=None, 
@@ -398,13 +409,38 @@ class PolyEmu():
         dim_reduction: whether to perform dimension reduction after fitting.
 
         per_mode_thres: threshold for dimension reduction per mode.
-        return_max_frac_err: whether to compute and store maximum fractional error on validation set.
-            When enabled, the worst case is stored on ``forward_max_frac_err`` /
-            ``backward_max_frac_err`` (signal-mask aware: entries below the per-output
-            signal floor are excluded), and the full diagnostic dict on
-            ``forward_frac_err_diag`` / ``backward_frac_err_diag``. See ``signal_mask.md``.
+        return_max_frac_err: whether to compute and store the signal-aware
+            fractional-error diagnostic on the validation set. See the
+            "Validation diagnostics" section below for the attributes set
+            when this is enabled.
         standardize_Y_with_std: whether to standardize Y with standard deviation (True) or only mean (False).
         batch_size: batch size for batched computations to manage memory usage.
+
+        Validation diagnostics
+        ----------------------
+        Set on the instance only when ``return_max_frac_err=True``; these
+        attributes default to ``None`` otherwise and are always safe to
+        read.
+
+        forward_max_frac_err : float or None
+            Worst in-mask relative error from the forward emulator on the
+            validation split. ``float('inf')`` when the signal mask is
+            empty (so threshold checks fail loudly), ``None`` when the
+            forward branch was not built or ``return_max_frac_err=False``.
+        forward_frac_err_diag : dict or None
+            Full diagnostic dict from :func:`signal_aware_frac_err` for the
+            forward emulator. Keys: ``max_rel``, ``rmse``, ``n_above``,
+            ``n_total``, ``floor``, ``dr_decades``, ``strategy``,
+            ``argmax``. ``None`` when the diagnostic was not requested.
+        backward_max_frac_err : float or None
+            Analogous to ``forward_max_frac_err`` for the backward
+            emulator.
+        backward_frac_err_diag : dict or None
+            Analogous to ``forward_frac_err_diag`` for the backward
+            emulator.
+
+        See ``signal_mask.md`` (repository root) for the diagnostic's
+        rationale and parameter calibration.
         """
         
         self.n_params = X.shape[1]

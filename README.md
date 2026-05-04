@@ -112,6 +112,50 @@ print(f"Forward symbolic expressions: {forward_expressions}")
 - **Automatic model selection**: Optimal polynomial degree chosen via validation
 - **Symbolic output**: Get interpretable closed-form polynomial expressions
 
+## 🎯 Signal-Aware Validation Diagnostic
+
+`PolyEmu` ships with a **signal-mask aware** fractional-error diagnostic that
+robustly handles outputs spanning many orders of magnitude. Naive
+`|diff| / |ref|` is undefined at floating-point-noise levels and would
+otherwise produce spurious validation failures on wide-dynamic-range outputs.
+
+Enable it by passing `return_max_frac_err=True`:
+
+```python
+from MomentEmu import PolyEmu
+
+emu = PolyEmu(X_train, Y_train,
+              forward=True,
+              return_max_frac_err=True)
+
+# Worst in-mask relative error (signal-mask filtered).
+# float('inf') if the signal mask is empty so threshold checks fail loudly.
+print(emu.forward_max_frac_err)
+
+# Full diagnostic dict: max_rel, rmse, n_above, n_total,
+# floor, dr_decades, strategy, argmax.
+print(emu.forward_frac_err_diag)
+```
+
+The helper is also available as a standalone function for ad-hoc validation:
+
+```python
+from MomentEmu import signal_aware_frac_err
+
+diag = signal_aware_frac_err(pred, ref, signal_floor_frac=1e-3)
+if diag["n_above"] == 0:
+    raise RuntimeError("signal mask empty; check fixture")
+assert diag["max_rel"] < 1e-5, (
+    f"max rel err {diag['max_rel']:.2e} at index {diag['argmax']}"
+)
+```
+
+> **Upgrade note:** Pre-existing code that read `forward_max_frac_err` /
+> `backward_max_frac_err` will see signal-mask-aware values now; numbers
+> will differ from the prior naive relative-RMSE for wide-dynamic-range
+> outputs. See [`signal_mask.md`](signal_mask.md) for the full design
+> rationale, calibration anchors, and failure modes.
+
 ## Auto-Differentiation Support
 
 **MomentEmu supports automatic differentiation** through three different frameworks, enabling gradient-based optimization, neural network integration, and exact symbolic analysis:

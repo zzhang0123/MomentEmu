@@ -12,6 +12,7 @@ Auto-differentiation support is available through:
 """
 
 from MomentEmu.PolyEmu import PolyEmu, evaluate_emulator, symbolic_polynomial_expressions
+from MomentEmu.MomentEmu import signal_aware_frac_err
 
 # Auto-differentiation modules (optional imports)
 __all_autodiff__ = []
@@ -36,4 +37,9 @@ except ImportError:
 
 __version__ = "1.0.0"
 __author__ = "Zheng Zhang"
-__all__ = ["PolyEmu", "evaluate_emulator", "symbolic_polynomial_expressions"] + __all_autodiff__
+__all__ = [
+    "PolyEmu",
+    "evaluate_emulator",
+    "symbolic_polynomial_expressions",
+    "signal_aware_frac_err",
+] + __all_autodiff__

@@ -1,9 +1,12 @@
 # Signal-mask strategy for relative-error gates
 
-> Sourced from canoes (cosmological angular statistics package; `~/projects/AngStats`)
-> as a battle-tested pattern for comparing numerical implementations whose output
-> spans many orders of magnitude. Drop-in candidate to replace / refine MomentEmu's
-> fractional RMSE strategy where target functions have similar dynamic range.
+> Ported from canoes (cosmological angular statistics package;
+> `~/projects/AngStats`) as a battle-tested pattern for comparing numerical
+> implementations whose output spans many orders of magnitude. **Integrated
+> into MomentEmu** as `signal_aware_frac_err()` (in
+> `src/MomentEmu/MomentEmu.py`); used by `PolyEmu.__init__` when
+> `return_max_frac_err=True`. This document is the design reference and
+> calibration guide — see also the function's docstring for the runtime API.
 
 ## The problem this solves
 
@@ -175,17 +178,23 @@ implementation) to catch cases where emulator + training share the same bug.
 
 ## Suggested integration into MomentEmu
 
-If MomentEmu's current fractional RMSE strategy is something like
+> **Status**: integrated. The shipped helper is
+> `MomentEmu.signal_aware_frac_err`, which extends the recipe below with
+> per-output dynamic-range detection (`dr_decades`, `strategy`),
+> `argmax` reporting, and a `dr_threshold_decades` knob. The minimal
+> conceptual core is preserved here for design reference.
+
+The conceptual core: replace a naive
 
 ```python
 rmse = np.sqrt(np.mean(((pred - ref) / ref) ** 2))
 ```
 
-a drop-in replacement that handles wide-dynamic-range outputs is
+with
 
 ```python
-def signal_aware_rmse(pred, ref, *, signal_floor_frac=1e-3,
-                      absolute_floor=1e-15):
+def signal_aware_frac_err(pred, ref, *, signal_floor_frac=1e-3,
+                          absolute_floor=1e-15):
     abs_ref = np.abs(ref)
     floor = max(signal_floor_frac * float(abs_ref.max()), absolute_floor)
     mask = abs_ref >= floor

@@ -153,8 +153,8 @@ assert diag["max_rel"] < 1e-5, (
 > **Upgrade note:** Pre-existing code that read `forward_max_frac_err` /
 > `backward_max_frac_err` will see signal-mask-aware values now; numbers
 > will differ from the prior naive relative-RMSE for wide-dynamic-range
-> outputs. See [`signal_mask.md`](signal_mask.md) for the full design
-> rationale, calibration anchors, and failure modes.
+> outputs. See `help(signal_aware_frac_err)` for parameter calibration
+> guidance and the meaning of each diagnostic key.
 
 ## Auto-Differentiation Support
 

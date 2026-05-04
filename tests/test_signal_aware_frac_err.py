@@ -1,14 +1,15 @@
 """Tests for the signal-mask aware fractional-error diagnostic.
 
-The pattern under test is documented in ``signal_mask.md`` at the repository
-root. These tests pin the four behaviours that motivated the refactor:
+The pattern under test is implemented by
+:func:`MomentEmu.signal_aware_frac_err`. These tests pin the four
+behaviours that motivated the refactor:
 
 1. Narrow-dynamic-range outputs use the plain relative-error path (the
    historical behaviour, modulo the new ULP-aware floor).
 2. Wide-dynamic-range outputs apply the signal mask, ignoring deep-tail
    FP-noise entries that would otherwise blow up the gate.
-3. The deep-tail example from ``signal_mask.md`` (ref ~ 1e-24, pred ~ 1e-4):
-   naive rel-err is huge, signal-mask rel-err is 0.
+3. Deep-tail FP-noise entries (ref ~ 1e-24, pred ~ 1e-4): naive rel-err
+   is huge, signal-mask rel-err is 0.
 4. Per-output mode picks each strategy independently when the columns sit
    in different DR regimes.
 """

@@ -308,9 +308,8 @@ def _report_frac_err(
     """Compute and pretty-print the signal-aware fractional-error diagnostic.
 
     Returns the diagnostic dict from :func:`signal_aware_frac_err` so that the
-    caller can attach it to the emulator instance.
-
-    See ``signal_mask.md`` (repository root) for parameter calibration.
+    caller can attach it to the emulator instance. See that function's
+    docstring for parameter calibration.
     """
     diag = signal_aware_frac_err(
         pred,
@@ -346,7 +345,7 @@ def _report_frac_err(
             f"\n  all in-mask entries match exactly"
             f"\n  in-mask entries: {diag['n_above']}/{diag['n_total']}"
             f"  | strategy: {strategy_label}"
-            f"\n  (entries below the per-output signal floor are excluded; see signal_mask.md)"
+            f"\n  (entries below the per-output signal floor are excluded)"
         )
         return diag
 
@@ -356,7 +355,7 @@ def _report_frac_err(
         f"\n  worst at index {ind}: true = {ref[ind]!r}, predicted = {pred[ind]!r}"
         f"\n  in-mask entries: {diag['n_above']}/{diag['n_total']}"
         f"  | strategy: {strategy_label}"
-        f"\n  (entries below the per-output signal floor are excluded; see signal_mask.md)"
+        f"\n  (entries below the per-output signal floor are excluded)"
     )
     return diag
 
@@ -439,8 +438,8 @@ class PolyEmu():
             Analogous to ``forward_frac_err_diag`` for the backward
             emulator.
 
-        See ``signal_mask.md`` (repository root) for the diagnostic's
-        rationale and parameter calibration.
+        See :func:`signal_aware_frac_err` for the diagnostic's
+        parameter calibration and the meaning of each dict key.
         """
         
         self.n_params = X.shape[1]

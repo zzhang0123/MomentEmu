@@ -244,9 +244,6 @@ def signal_aware_frac_err(
     not change the masking formula — see the ``dr_threshold_decades``
     parameter below.
 
-    See ``signal_mask.md`` (repository root) for the full rationale,
-    calibration anchors, and failure modes.
-
     Parameters
     ----------
     pred, ref : ndarray
@@ -266,9 +263,9 @@ def signal_aware_frac_err(
         dynamic range exceeds this value are tagged with strategy
         ``"signal_mask"``; the rest are tagged ``"plain_rel"``. The floor
         formula is identical on both branches
-        (``max(signal_floor_frac * peak, absolute_floor)``,
-        ``signal_mask.md`` lines 62-63) — this parameter controls the
-        diagnostic *label* only, not the masking behaviour.
+        (``max(signal_floor_frac * peak, absolute_floor)``) — this
+        parameter controls the diagnostic *label* only, not the masking
+        behaviour.
     per_output : bool, default True
         If True and ``ref`` is 2D, the dynamic-range detection and mask are
         applied per output column. If False (or ``ref`` is 1D), the whole
@@ -329,9 +326,13 @@ def signal_aware_frac_err(
     near-strict relative-error gates with narrow dynamic range, lower it
     to ``1e-6`` or ``1e-9``. For wide-dynamic-range outputs where
     deep-tail entries are floating-point noise (e.g. ``1e-7`` to
-    ``1e-24`` spans), the default is appropriate. See
-    ``signal_mask.md`` § "The two parameters explained" for the
-    calibration discussion.
+    ``1e-24`` spans), the default is appropriate.
+
+    A useful calibration heuristic: pick ``signal_floor_frac`` so the
+    masked-out entries' aggregate contribution to any user-facing
+    observable is ≤ the rtol gate. For an rtol of ``1e-7`` on an
+    observable that is at most cubic in this tensor, set the floor at
+    ``(1e-7)^(1/3) ≈ 5e-3``.
 
     Examples
     --------
@@ -368,7 +369,7 @@ def signal_aware_frac_err(
         warnings.warn(
             "signal_floor_frac=0 disables the signal mask; the floor degrades to "
             "absolute_floor for every output. Set a positive value (default 1e-3) "
-            "to engage the mask. See signal_mask.md for calibration.",
+            "to engage the mask.",
             UserWarning,
             stacklevel=2,
         )
@@ -395,10 +396,10 @@ def signal_aware_frac_err(
                 0.0,
             )
         wide_dr = dr >= dr_threshold_decades                    # shape (1, m)
-        # Floor follows signal_mask.md (lines 62-63 / 186-203): a single
-        # formula `max(signal_floor_frac * peak, absolute_floor)` regardless
-        # of dynamic range. The wide_dr flag is kept purely as a diagnostic
-        # label so a caller can see *why* a column was masked aggressively.
+        # Single-formula floor: max(signal_floor_frac * peak, absolute_floor)
+        # regardless of dynamic range. The wide_dr flag is kept purely as a
+        # diagnostic label so a caller can see *why* a column was masked
+        # aggressively.
         floor_signal = signal_floor_frac * peak                 # shape (1, m)
         floor = np.maximum(floor_signal, absolute_floor)        # shape (1, m)
 
@@ -415,8 +416,8 @@ def signal_aware_frac_err(
         else:
             dr_scalar = 0.0
         wide_dr_scalar = dr_scalar >= dr_threshold_decades
-        # Same single-formula floor as the per-output branch (signal_mask.md
-        # lines 62-63 / 186-203); strategy stays purely diagnostic.
+        # Same single-formula floor as the per-output branch; strategy
+        # stays purely diagnostic.
         floor_scalar = max(signal_floor_frac * peak, absolute_floor)
         mask = abs_ref >= floor_scalar
         strategy = "signal_mask" if wide_dr_scalar else "plain_rel"

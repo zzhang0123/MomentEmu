@@ -28,6 +28,9 @@ __pycache__/
 # Pytest cache
 .pytest_cache/
 
+# Local design notes / private references (kept out of the published repo)
+signal_mask.md
+
 # OS generated files
 .DS_Store
 .DS_Store?

@@ -6,7 +6,14 @@ from logging import warning
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
-from MomentEmu.MomentEmu import generate_moment_products, solve_emulator_coefficients, predictive_mse_aic_bic, select_best_model, filter_modes
+from MomentEmu.MomentEmu import (
+    generate_moment_products,
+    solve_emulator_coefficients,
+    predictive_mse_aic_bic,
+    select_best_model,
+    filter_modes,
+    signal_aware_frac_err,
+)
 
 
 
@@ -275,6 +282,83 @@ def max_order(n_params, N_samples):
     return k
 
 
+def _unscale_val(scaler_X, scaler_Y, X_val_scaled, Y_val_scaled, log_Y):
+    """Invert StandardScaler (and the optional log transform on Y) on a
+    validation tuple. Centralises the three lines that were duplicated at
+    the forward and backward fractional-error sites.
+    """
+    X = scaler_X.inverse_transform(X_val_scaled)
+    Y = scaler_Y.inverse_transform(Y_val_scaled)
+    if log_Y:
+        Y = np.exp(Y)
+    return X, Y
+
+
+def _report_frac_err(
+    label,
+    pred,
+    ref,
+    *,
+    signal_floor_frac=1e-3,
+    absolute_floor=1e-15,
+    dr_threshold_decades=3.0,
+):
+    """Compute and pretty-print the signal-aware fractional-error diagnostic.
+
+    Returns the diagnostic dict from :func:`signal_aware_frac_err` so that the
+    caller can attach it to the emulator instance.
+
+    See ``signal_mask.md`` (repository root) for parameter calibration.
+    """
+    diag = signal_aware_frac_err(
+        pred,
+        ref,
+        signal_floor_frac=signal_floor_frac,
+        absolute_floor=absolute_floor,
+        dr_threshold_decades=dr_threshold_decades,
+    )
+
+    if diag["n_above"] == 0:
+        print(
+            f"\n{label} emulator fractional-error diagnostic: signal mask empty "
+            f"(no entries above floor {diag['floor']!r}); reference appears to be "
+            f"at floating-point noise level."
+        )
+        return diag
+
+    ind = diag["argmax"]
+    strategy = diag["strategy"]
+    if isinstance(strategy, np.ndarray):
+        strategy_label = "per-output: " + ", ".join(str(s) for s in strategy.tolist())
+    else:
+        strategy_label = str(strategy)
+
+    # When max_rel == 0 every in-mask entry matched exactly; argmax is None.
+    # Indexing ref[None] would silently mean ref[np.newaxis] in NumPy, which
+    # would dump the whole array instead of a single entry — handle this
+    # branch explicitly with no per-entry indexing.
+    if ind is None:
+        print(
+            f"\n{label} emulator signal-aware fractional error:"
+            f"\n  max_rel = {diag['max_rel']:.3e}  rmse = {diag['rmse']:.3e}"
+            f"\n  all in-mask entries match exactly"
+            f"\n  in-mask entries: {diag['n_above']}/{diag['n_total']}"
+            f"  | strategy: {strategy_label}"
+            f"\n  (entries below the per-output signal floor are excluded; see signal_mask.md)"
+        )
+        return diag
+
+    print(
+        f"\n{label} emulator signal-aware fractional error:"
+        f"\n  max_rel = {diag['max_rel']:.3e}  rmse = {diag['rmse']:.3e}"
+        f"\n  worst at index {ind}: true = {ref[ind]!r}, predicted = {pred[ind]!r}"
+        f"\n  in-mask entries: {diag['n_above']}/{diag['n_total']}"
+        f"  | strategy: {strategy_label}"
+        f"\n  (entries below the per-output signal floor are excluded; see signal_mask.md)"
+    )
+    return diag
+
+
 class PolyEmu():
     def __init__(self, 
                 X, 
@@ -315,6 +399,10 @@ class PolyEmu():
 
         per_mode_thres: threshold for dimension reduction per mode.
         return_max_frac_err: whether to compute and store maximum fractional error on validation set.
+            When enabled, the worst case is stored on ``forward_max_frac_err`` /
+            ``backward_max_frac_err`` (signal-mask aware: entries below the per-output
+            signal floor are excluded), and the full diagnostic dict on
+            ``forward_frac_err_diag`` / ``backward_frac_err_diag``. See ``signal_mask.md``.
         standardize_Y_with_std: whether to standardize Y with standard deviation (True) or only mean (False).
         batch_size: batch size for batched computations to manage memory usage.
         """
@@ -386,19 +474,20 @@ class PolyEmu():
             )
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
-                X_val_unscaled = self.scaler_X.inverse_transform(X_val)
-                Y_val_unscaled = self.scaler_Y.inverse_transform(Y_val)
-                if self.log_Y:
-                    Y_val_unscaled = np.exp(Y_val_unscaled)
-                
+                X_val_unscaled, Y_val_unscaled = _unscale_val(
+                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.log_Y
+                )
+
                 Y_val_pred = self.forward_emulator(X_val_unscaled)
-                frac_err = np.abs((Y_val_pred - Y_val_unscaled)) / (np.abs(Y_val_unscaled) + 1e-10)
-                max_frac_err = np.max(frac_err)
-                self.forward_max_frac_err = max_frac_err
-                ind = np.unravel_index(np.argmax(frac_err), Y_val_unscaled.shape)
-                print(f"\nForward emulator maximum fractional error: {max_frac_err} at index {ind}. \n \
-                      True value: {Y_val_unscaled[ind]}, Predicted value: {Y_val_pred[ind]} \n \
-                      (If the true value is close to 0, this value could be very large.)")
+                diag = _report_frac_err("Forward", Y_val_pred, Y_val_unscaled)
+                self.forward_frac_err_diag = diag
+                # Coerce nan -> inf on the public attribute so downstream
+                # threshold comparisons (`emu.forward_max_frac_err > tol`) fail
+                # loudly when the signal mask is empty. The diag dict still
+                # carries the spec-compliant nan for n_above == 0.
+                self.forward_max_frac_err = (
+                    diag["max_rel"] if diag["n_above"] > 0 else float("inf")
+                )
 
         if backward:
             print("Generating backward emulator...")
@@ -422,19 +511,18 @@ class PolyEmu():
                                             batch_size=batch_size)
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
-                X_val_unscaled = self.scaler_X.inverse_transform(X_val)
-                Y_val_unscaled = self.scaler_Y.inverse_transform(Y_val)
-                if self.log_Y:
-                    Y_val_unscaled = np.exp(Y_val_unscaled)
-                
+                X_val_unscaled, Y_val_unscaled = _unscale_val(
+                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.log_Y
+                )
+
                 X_val_pred = self.backward_emulator(Y_val_unscaled)
-                frac_err = np.abs((X_val_pred - X_val_unscaled)) / (np.abs(X_val_unscaled) + 1e-10)
-                max_frac_err = np.max(frac_err)
-                self.backward_max_frac_err = max_frac_err
-                ind = np.unravel_index(np.argmax(frac_err), X_val_unscaled.shape)
-                print(f"\nBackward emulator maximum fractional error: {max_frac_err} at index {ind}. \n \
-                      True value: {X_val_unscaled[ind]}, Predicted value: {X_val_pred[ind]} \n \
-                      (If the true value is close to 0, this value could be very large.)")
+                diag = _report_frac_err("Backward", X_val_pred, X_val_unscaled)
+                self.backward_frac_err_diag = diag
+                # See forward branch: coerce nan -> inf so threshold checks
+                # fail loudly when the signal mask is empty.
+                self.backward_max_frac_err = (
+                    diag["max_rel"] if diag["n_above"] > 0 else float("inf")
+                )
 
     def generate_forward_emulator(self, 
                                   X_train_scaled, 

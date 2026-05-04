@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 
 
@@ -215,6 +217,182 @@ def select_best_model(rmse_list, aic_list=None, bic_list=None, rmse_tol=0.05):
         print(f"Selected best model index based on RMSE : {best_idx}")
 
     return best_idx
+
+
+####### Signal-mask aware fractional error #######
+def signal_aware_frac_err(
+    pred,
+    ref,
+    *,
+    signal_floor_frac=1e-3,
+    absolute_floor=1e-15,
+    dr_threshold_decades=3.0,
+    per_output=True,
+):
+    """Signal-mask aware fractional-error diagnostic for emulator validation.
+
+    Robustly compares a prediction to a reference whose entries may span many
+    orders of magnitude. Naive ``|diff| / |ref|`` is undefined when ``|ref|``
+    is at the floating-point noise floor; this helper masks out such entries
+    when the per-output dynamic range exceeds ``dr_threshold_decades``, and
+    falls back to a plain relative-error gate (with a small absolute floor)
+    for low-dynamic-range outputs.
+
+    See ``signal_mask.md`` (repository root) for the full rationale and
+    calibration guidance.
+
+    Parameters
+    ----------
+    pred, ref : ndarray
+        Predicted and reference arrays. Must have matching shapes. Typical
+        emulator-validation use is ``ref`` of shape ``(n_samples, n_outputs)``.
+    signal_floor_frac : float, default 1e-3
+        Mask floor as a fraction of the per-output peak amplitude. Entries
+        whose magnitude is below ``signal_floor_frac * |ref|.max()`` (along
+        the per-output axis) are treated as floating-point noise and excluded
+        from the fractional-error reduction.
+    absolute_floor : float, default 1e-15
+        Hard lower bound on the floor; defends against fixtures where the
+        whole reference is at FP noise level.
+    dr_threshold_decades : float, default 3.0
+        Diagnostic threshold on per-output dynamic range. Outputs whose
+        dynamic range exceeds this value are tagged with strategy
+        ``"signal_mask"``; the rest are tagged ``"plain_rel"``. The floor
+        formula is identical on both branches —
+        ``max(signal_floor_frac * peak, absolute_floor)`` (signal_mask.md
+        lines 62-63) — so this parameter controls the diagnostic *label*
+        only, not the masking behaviour.
+    per_output : bool, default True
+        If True and ``ref`` is 2D, the dynamic-range detection and mask are
+        applied per output column. If False (or ``ref`` is 1D), the whole
+        array is treated as a single tensor.
+
+    Returns
+    -------
+    dict
+        Diagnostic-rich dict with keys:
+
+        - ``max_rel`` : worst in-mask relative error across all outputs
+        - ``rmse`` : root-mean-square fractional error across in-mask entries
+        - ``n_above`` : total number of entries above the signal floor
+        - ``n_total`` : total number of entries
+        - ``floor`` : per-output (or scalar) floor used
+        - ``dr_decades`` : per-output (or scalar) dynamic range estimate
+        - ``strategy`` : per-output (or scalar) label, ``"signal_mask"`` or
+          ``"plain_rel"``
+        - ``argmax`` : index (tuple) of the worst in-mask entry, or ``None``
+          when no entry is above the floor
+    """
+    pred = np.asarray(pred)
+    ref = np.asarray(ref)
+    if pred.shape != ref.shape:
+        raise ValueError(
+            f"pred and ref must have matching shapes; got {pred.shape} vs {ref.shape}"
+        )
+    if signal_floor_frac < 0 or absolute_floor < 0 or dr_threshold_decades < 0:
+        raise ValueError("signal_floor_frac, absolute_floor, dr_threshold_decades must be non-negative")
+    if signal_floor_frac == 0:
+        warnings.warn(
+            "signal_floor_frac=0 disables the signal mask; the floor degrades to "
+            "absolute_floor for every output. Set a positive value (default 1e-3) "
+            "to engage the mask. See signal_mask.md for calibration.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    abs_ref = np.abs(ref)
+    abs_diff = np.abs(pred - ref)
+
+    use_per_output = bool(per_output) and abs_ref.ndim == 2
+
+    if use_per_output:
+        # Per-column statistics broadcast back to original shape.
+        peak = abs_ref.max(axis=0, keepdims=True)              # shape (1, m)
+        # Per-column smallest positive entry; columns with no positive entry
+        # collapse to NaN here and are forced to dr = 0 below.
+        finite_pos = np.where(abs_ref > 0, abs_ref, np.nan)
+        with warnings.catch_warnings(), np.errstate(invalid="ignore"):
+            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+            min_pos = np.nanmin(finite_pos, axis=0, keepdims=True)
+        # dr_decades per column; 0 when all entries are zero or peak <= 0.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dr = np.where(
+                (peak > 0) & np.isfinite(min_pos) & (min_pos > 0),
+                np.log10(peak / min_pos),
+                0.0,
+            )
+        wide_dr = dr >= dr_threshold_decades                    # shape (1, m)
+        # Floor follows signal_mask.md (lines 62-63 / 186-203): a single
+        # formula `max(signal_floor_frac * peak, absolute_floor)` regardless
+        # of dynamic range. The wide_dr flag is kept purely as a diagnostic
+        # label so a caller can see *why* a column was masked aggressively.
+        floor_signal = signal_floor_frac * peak                 # shape (1, m)
+        floor = np.maximum(floor_signal, absolute_floor)        # shape (1, m)
+
+        mask = abs_ref >= floor                                  # broadcasts to ref shape
+        # Strategy label per column
+        strategy = np.where(wide_dr.squeeze(0), "signal_mask", "plain_rel")
+        floor_out = floor.squeeze(0).copy()
+        dr_out = dr.squeeze(0).copy()
+    else:
+        peak = float(abs_ref.max()) if abs_ref.size else 0.0
+        positive = abs_ref[abs_ref > 0]
+        if positive.size and peak > 0:
+            dr_scalar = float(np.log10(peak / positive.min()))
+        else:
+            dr_scalar = 0.0
+        wide_dr_scalar = dr_scalar >= dr_threshold_decades
+        # Same single-formula floor as the per-output branch (signal_mask.md
+        # lines 62-63 / 186-203); strategy stays purely diagnostic.
+        floor_scalar = max(signal_floor_frac * peak, absolute_floor)
+        mask = abs_ref >= floor_scalar
+        strategy = "signal_mask" if wide_dr_scalar else "plain_rel"
+        floor_out = float(floor_scalar)
+        dr_out = float(dr_scalar)
+
+    n_total = int(ref.size)
+    n_above = int(mask.sum())
+
+    if n_above == 0:
+        return {
+            "max_rel": float("nan"),
+            "rmse": float("nan"),
+            "n_above": 0,
+            "n_total": n_total,
+            "floor": floor_out,
+            "dr_decades": dr_out,
+            "strategy": strategy,
+            "argmax": None,
+        }
+
+    # Compute relative error only on masked entries; off-mask entries are
+    # set to 0 so they neither contribute to the max nor inflate the RMSE.
+    safe_abs_ref = np.where(mask, abs_ref, 1.0)                 # avoid /0 off-mask
+    rel = np.where(mask, abs_diff / safe_abs_ref, 0.0)
+
+    rel_in_mask = rel[mask]
+    rmse = float(np.sqrt(np.mean(rel_in_mask ** 2)))
+    max_rel = float(rel_in_mask.max())
+
+    # When max_rel == 0 every in-mask entry is exact; np.argmax would still
+    # return 0 but that index is arbitrary and would mislead a user reading
+    # the diagnostic. Report None instead.
+    if max_rel == 0.0:
+        argmax_out = None
+    else:
+        flat_argmax = int(np.argmax(rel))
+        argmax_out = tuple(int(i) for i in np.unravel_index(flat_argmax, ref.shape))
+
+    return {
+        "max_rel": max_rel,
+        "rmse": rmse,
+        "n_above": n_above,
+        "n_total": n_total,
+        "floor": floor_out,
+        "dr_decades": dr_out,
+        "strategy": strategy,
+        "argmax": argmax_out,
+    }
 
 
 

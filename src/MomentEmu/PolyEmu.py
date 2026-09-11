@@ -1430,6 +1430,27 @@ class PolyEmu():
             X, Y = X[mask], Y[mask]
         return PolyEmu(X, Y, **kwargs)
 
+    def save(self, path, *, float32=False, dataset_sha256=None):
+        """Write this emulator to a versioned .npz (P4.2)."""
+        from MomentEmu.io import save_emulator
+
+        return save_emulator(
+            self, path, float32=float32, dataset_sha256=dataset_sha256
+        )
+
+    @classmethod
+    def load(cls, path):
+        """Load an emulator from a versioned .npz without sklearn (P4.2)."""
+        from MomentEmu.io import load_emulator
+
+        return load_emulator(path)
+
+    def fingerprint(self):
+        """SHA-256 fingerprint of the stored coefficients (P4.2)."""
+        from MomentEmu.io import fingerprint
+
+        return fingerprint(self)
+
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""
         t = getattr(self, "transform", None)

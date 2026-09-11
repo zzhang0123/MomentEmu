@@ -1,128 +1,112 @@
-"""
-JAX-based auto-differentiable MomentEmu implementation
+"""JAX backend for MomentEmu (P0.8 stopgap; rebuilt on the P0.7 plan in P2.1).
 
-This module provides JAX integration for MomentEmu, enabling:
-- High-performance computing with JIT compilation
-- Automatic differentiation for gradients, Jacobians, and Hessians
-- GPU acceleration support
-- Vectorized batch operations
-
-Key functions:
-- create_jax_emulator(): Convert trained MomentEmu to JAX format
-- demo_jax_autodiff(): Demonstration of JAX auto-differentiation capabilities
+This module wraps a fitted :class:`~MomentEmu.PolyEmu.PolyEmu` in a
+jax.jit-able function.  The stopgap refuses inputs the old implementation
+answered wrongly (log_Y, a missing output scale) and evaluates monomials with
+static Python-int exponents so zero exponents never enter an autodiff graph
+(the NaN-at-the-mean bug).
 """
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from jax import grad, jacfwd, jacrev
 import numpy as np
-from MomentEmu.PolyEmu import PolyEmu
+
+from MomentEmu.guards import check_backend_supports, output_scale
 
 
-def evaluate_monomials_jax_v1(X_scaled, multi_indices):
-    """JAX-compatible monomial evaluation."""
+def evaluate_monomials_jax_static(X_scaled, multi_indices, *, x64=None):
+    """Static-exponent monomial evaluation (skips degree 0).
+
+    ``multi_indices`` is a NumPy int array, so every exponent is a Python int
+    at trace time.  The old ``X ** multi_indices`` made JAX differentiate
+    ``x ** 0``, whose derivative is NaN at x = 0 (the training mean after
+    standardisation).
+    """
+    X_scaled = jnp.asarray(X_scaled)
     if X_scaled.ndim == 1:
         X_scaled = X_scaled.reshape(1, -1)
-    
-    N, n = X_scaled.shape
-    D = len(multi_indices)
-    
-    Phi = jnp.ones((N, D))
-    for j, alpha in enumerate(multi_indices):
-        monomial = jnp.ones(N)
+    N = X_scaled.shape[0]
+    mi = np.asarray(multi_indices)
+    columns = []
+    for alpha in mi:
+        monomial = jnp.ones(N, dtype=X_scaled.dtype)
         for i, deg in enumerate(alpha):
             if deg > 0:
-                monomial = monomial * (X_scaled[:, i] ** deg)
-        Phi = Phi.at[:, j].set(monomial)
-    
-    return Phi
+                monomial = monomial * (X_scaled[:, i] ** int(deg))
+        columns.append(monomial)
+    return jnp.stack(columns, axis=1)
 
-@jax.jit
-def evaluate_monomials_jax(X_scaled, multi_indices):
-    """JAX-compatible monomial evaluation."""
-    # More efficient vectorized approach
-    Phi = jnp.prod(X_scaled[:, None, :] ** multi_indices[None, :, :], axis=2)
-    return Phi
 
 def create_jax_emulator(emulator):
-    """Convert trained MomentEmu to JAX-differentiable function."""
-    
-    # Extract learned parameters
-    coeffs = jnp.array(emulator.forward_coeffs)
-    multi_indices = jnp.array(emulator.forward_multi_indices)
-    
-    # Extract scaling parameters
-    input_mean = jnp.array(emulator.scaler_X.mean_)
-    input_scale = jnp.array(emulator.scaler_X.scale_)
-    output_mean = jnp.array(emulator.scaler_Y.mean_)
-    output_scale = jnp.array(emulator.scaler_Y.scale_)
-    
+    """Return a jitted JAX function equivalent to forward_emulator.
+
+    Raises NotImplementedError for a log_Y fit (the backend would otherwise
+    return log Y) and ValueError when the emulator has no forward coefficients.
+    """
+    check_backend_supports(emulator, "jax")
+
+    coeffs = jnp.asarray(emulator.forward_coeffs)
+    multi_indices = np.asarray(emulator.forward_multi_indices)
+    input_mean = jnp.asarray(emulator.scaler_X.mean_)
+    input_scale = jnp.asarray(emulator.scaler_X.scale_)
+    output_mean = jnp.asarray(emulator.scaler_Y.mean_)
+    output_scale_ = jnp.asarray(output_scale(emulator.scaler_Y, emulator.n_outputs))
+    n_params = int(emulator.n_params)
+    n_outputs = int(emulator.n_outputs)
+
     @jax.jit
     def jax_emulator(X):
-        """JAX-compiled differentiable emulator."""
-        # Handle scalar input
-        X = jnp.atleast_1d(X)
-        # Handle single sample
-        single_sample = False
-        if X.ndim == 1:
-            single_sample = True
-            X = X.reshape(1, -1)
-        
-        # Scale inputs
+        X = jnp.asarray(X)
+        if X.ndim == 0:
+            if n_params != 1:
+                raise ValueError(
+                    f"scalar input given but the emulator has n_params = {n_params}"
+                )
+            single = True
+            X = X.reshape(1, 1)
+        elif X.ndim == 1:
+            if X.shape[0] != n_params:
+                raise ValueError(
+                    f"1-D input has {X.shape[0]} elements; expected n_params = "
+                    f"{n_params}. A 1-D array is a single sample only when its "
+                    f"length equals n_params; pass a 2-D (N, n_params) array "
+                    f"otherwise."
+                )
+            single = True
+            X = X.reshape(1, n_params)
+        else:
+            if X.shape[-1] != n_params:
+                raise ValueError(
+                    f"input has {X.shape[-1]} elements along its last axis; "
+                    f"expected n_params = {n_params}"
+                )
+            single = False
         X_scaled = (X - input_mean) / input_scale
-        
-        # Evaluate polynomials
-        Phi = evaluate_monomials_jax(X_scaled, multi_indices)
-        
-        # Predict scaled outputs
-        Y_scaled = Phi @ coeffs # (N, D) @ (D, m) -> (N, m)
-        
-        # Unscale outputs
-        Y = Y_scaled * output_scale + output_mean
-        if single_sample:
+        Phi = evaluate_monomials_jax_static(X_scaled, multi_indices)
+        Y = Phi @ coeffs * output_scale_ + output_mean
+        if single:
             Y = Y[0]
         return Y
-    
+
     return jax_emulator
 
-# Example usage
+
 def demo_jax_autodiff():
-    """Demonstrate auto-differentiation with JAX."""
-    
-    # Train regular MomentEmu
-    print("Training MomentEmu...")
-    np.random.seed(42)
-    X_train = np.random.uniform(-1, 1, (100, 2))
-    Y_train = (X_train[:, 0]**2 + X_train[:, 1]**2).reshape(-1, 1)
-    
-    emulator = PolyEmu(X_train, Y_train, forward=True, backward=False)
-    
-    # Convert to JAX
-    print("Converting to JAX...")
-    jax_emu = create_jax_emulator(emulator)
-    
-    # Test point
-    x_test = jnp.array([0.5, 0.3])
-    
-    # Forward pass
-    y_pred = jax_emu(x_test)
-    print(f"Prediction: {y_pred}")
-    
-    # Compute gradient
-    grad_fn = grad(lambda x: jax_emu(x).sum())
-    gradient = grad_fn(x_test)
-    print(f"Gradient: {gradient}")
-    
-    # Compute Jacobian
-    jac_fn = jacfwd(jax_emu)
-    jacobian = jac_fn(x_test)
-    print(f"Jacobian shape: {jacobian.shape}")
-    print(f"Jacobian: {jacobian}")
-    
-    # Compute Hessian
-    hess_fn = jacfwd(jacrev(lambda x: jax_emu(x).sum()))
-    hessian = hess_fn(x_test)
-    print(f"Hessian: {hessian}")
+    """Demonstrate JAX gradients on a small quadratic emulator."""
+    from MomentEmu.PolyEmu import PolyEmu
+
+    jax.config.update("jax_enable_x64", True)
+    rng = np.random.default_rng(42)
+    X = rng.uniform(-1, 1, (200, 2))
+    Y = (X[:, 0] ** 2 + X[:, 1] ** 2).reshape(-1, 1)
+    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=2, dim_reduction=False)
+    f = create_jax_emulator(emu)
+    x = jnp.array([0.5, 0.3])
+    print("prediction:", f(x))
+    print("gradient:", jax.grad(lambda v: f(v).sum())(x))
+    print("hessian:", jax.hessian(lambda v: f(v).sum())(x))
+
 
 if __name__ == "__main__":
     demo_jax_autodiff()

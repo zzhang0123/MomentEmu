@@ -16,11 +16,13 @@ Key components:
 import sympy as sp
 import numpy as np
 from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.guards import check_backend_supports
 
 class SymbolicMomentEmu:
     """Symbolic differentiable MomentEmu using SymPy."""
     
     def __init__(self, trained_emulator, variable_names=None):
+        check_backend_supports(trained_emulator, "symbolic")
         self.emulator = trained_emulator
         
         # Get symbolic expressions

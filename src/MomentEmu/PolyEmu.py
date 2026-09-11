@@ -1157,6 +1157,11 @@ class PolyEmu():
         return X_pred
 
     def generate_forward_symb_emu(self, variable_names=None):
+        if self.log_Y:
+            raise NotImplementedError(
+                "symbolic export of a log_Y emulator is not implemented yet "
+                "(P2.4); the returned expression would be in log Y."
+            )
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
         exprs = symbolic_polynomial_expressions(self.forward_coeffs, 
                                                 self.forward_multi_indices, 
@@ -1168,6 +1173,11 @@ class PolyEmu():
         return exprs
     
     def generate_backward_symb_emu(self, variable_names=None):
+        if self.log_Y:
+            raise NotImplementedError(
+                "symbolic export of a log_Y emulator is not implemented yet "
+                "(P2.4); the returned expression would be in log Y."
+            )
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
         exprs = symbolic_polynomial_expressions(self.backward_coeffs, 
                                                 self.backward_multi_indices, 

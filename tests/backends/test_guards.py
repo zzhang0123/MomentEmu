@@ -55,9 +55,15 @@ def logy_emu():
 
 
 @pytest.mark.backend
-def test_backend_rejects_logy(logy_emu):
-    with pytest.raises(NotImplementedError):
-        create_jax_emulator(logy_emu)
+def test_jax_backend_supports_logy(logy_emu):
+    # P2.1: the JAX backend now applies exp; torch/symbolic still refuse
+    # until P2.3/P2.4.
+    rng = np.random.default_rng(20)
+    X = rng.uniform(-1.0, 1.0, (200, 2))
+    f = create_jax_emulator(logy_emu)
+    got = np.asarray(f(jnp.asarray(X)))
+    ref = logy_emu.forward_emulator(X)
+    assert _col_rel(got, ref) < 1e-12
     with pytest.raises(NotImplementedError):
         TorchMomentEmu(logy_emu)
     with pytest.raises(NotImplementedError):

@@ -55,7 +55,16 @@ def test_logy_ignored_by_all_three_backends(logy_emu):
     from MomentEmu.symbolic_momentemu import create_symbolic_emulator
     from MomentEmu.torch_momentemu import TorchMomentEmu
 
-    for make in (create_jax_emulator, TorchMomentEmu, create_symbolic_emulator):
+    # P2.1 added log_Y support to JAX; torch/symbolic still refuse.
+    import jax.numpy as jnp
+
+    rng = np.random.default_rng(30)
+    X = rng.uniform(-1.0, 1.0, (100, 2))
+    got = np.asarray(create_jax_emulator(logy_emu)(jnp.asarray(X)))
+    assert np.max(np.abs(got - logy_emu.forward_emulator(X))) / np.max(
+        np.abs(logy_emu.forward_emulator(X))
+    ) < 1e-12
+    for make in (TorchMomentEmu, create_symbolic_emulator):
         with pytest.raises(NotImplementedError):
             make(logy_emu)
 
@@ -389,11 +398,18 @@ def test_inverse_returns_conditional_mean():
     assert hasattr(PolyEmu, "backward_pca")
 
 
-@pytest.mark.xfail(strict=True, reason="P2.1 jax x64 guard")
 def test_jax_float32_default_silent():
-    from MomentEmu.jax_momentemu import create_jax_emulator
+    import inspect
 
-    assert "enable_x64" in (create_jax_emulator.__doc__ or "")
+    from MomentEmu.jax_momentemu import JaxEmulator
+
+    rng = np.random.default_rng(40)
+    X = rng.uniform(-1.0, 1.0, (200, 2))
+    Y = (X[:, 0] ** 2).reshape(-1, 1)
+    e = PolyEmu(X, Y, max_degree_forward=2, verbose=0)
+    je = JaxEmulator.from_polyemu(e)
+    assert je.dtype == jax.numpy.float64
+    assert "enable_x64" in inspect.getsource(JaxEmulator.from_polyemu)
 
 
 @pytest.mark.xfail(strict=True, reason="P5.1 incremental sweep")

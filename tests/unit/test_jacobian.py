@@ -43,13 +43,7 @@ def test_jacobian_matches_central_fd(log_Y):
     assert err < 1e-7, err
 
 
-@pytest.mark.parametrize(
-    "log_Y",
-    [
-        False,
-        pytest.param(True, marks=pytest.mark.xfail(strict=True, reason="P2.1 log_Y backend")),
-    ],
-)
+@pytest.mark.parametrize("log_Y", [False, True])
 def test_jacobian_matches_jax_jacfwd(log_Y):
     import jax
     import jax.numpy as jnp

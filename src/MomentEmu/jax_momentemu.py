@@ -1,35 +1,215 @@
-"""JAX backend for MomentEmu (P0.8 stopgap; rebuilt on the P0.7 plan in P2.1).
+"""JAX backend on the shared monomial plan (P2.1, D2).
 
-This module wraps a fitted :class:`~MomentEmu.PolyEmu.PolyEmu` in a
-jax.jit-able function.  The stopgap refuses inputs the old implementation
-answered wrongly (log_Y, a missing output scale) and evaluates monomials with
-static Python-int exponents so zero exponents never enter an autodiff graph
-(the NaN-at-the-mean bug).
+A fitted PolyEmu converts to a frozen dataclass registered with
+``jax.tree_util.register_dataclass``.  The array leaves are the folded
+coefficients, the input scaler, the training box and the P0.7 plan tables
+(int32); the static metadata is the parameter/output counts, the maximum
+degree, the log flags and the direction.  ``evaluate`` is un-jitted so it can
+be composed inside a user log-density; ``__call__`` is the jax.jit entry
+point, and value_and_grad / jacfwd / hessian helpers wrap it.  There is no
+equinox dependency and no eqx.filter_jit.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from MomentEmu.guards import check_backend_supports, output_scale
+from MomentEmu.guards import output_scale
 
 
-def evaluate_monomials_jax_static(X_scaled, multi_indices, *, x64=None):
-    """Static-exponent monomial evaluation (skips degree 0).
+def _evaluate_impl(emulator, X):
+    return emulator.evaluate(X)
 
-    ``multi_indices`` is a NumPy int array, so every exponent is a Python int
-    at trace time.  The old ``X ** multi_indices`` made JAX differentiate
-    ``x ** 0``, whose derivative is NaN at x = 0 (the training mean after
-    standardisation).
+
+_JITTED_EVALUATE = jax.jit(_evaluate_impl)
+
+
+@dataclass(frozen=True)
+class JaxEmulator:
+    """JAX pytree emulator for a fitted forward or backward PolyEmu."""
+
+    coeffs: object       # (D, m) folded affine coefficients
+    input_mean: object
+    input_scale: object
+    box_lo: object
+    box_hi: object
+    closure_parent: object
+    closure_var: object
+    level_rows: object
+    select: object
+    n_params: int
+    n_outputs: int
+    dmax: int
+    level_sizes: tuple
+    log_input: bool
+    log_output: bool
+    direction: str
+    dtype: object
+
+    def evaluate(self, X):
+        """Un-jitted evaluation: safe inside a user jax.jit log-density."""
+        X = jnp.asarray(X, dtype=self.dtype)
+        if X.ndim == 0:
+            if self.n_params != 1:
+                raise ValueError(
+                    f"scalar input given but the emulator has n_params = {self.n_params}"
+                )
+            single = True
+            X = X.reshape(1, 1)
+        elif X.ndim == 1:
+            if X.shape[0] != self.n_params:
+                raise ValueError(
+                    f"1-D input has {X.shape[0]} elements; expected n_params = "
+                    f"{self.n_params}. A 1-D array is a single sample only when its "
+                    f"length equals n_params."
+                )
+            single = True
+            X = X.reshape(1, self.n_params)
+        else:
+            if X.shape[-1] != self.n_params:
+                raise ValueError(
+                    f"input has {X.shape[-1]} elements along its last axis; expected "
+                    f"n_params = {self.n_params}"
+                )
+            single = False
+        if self.log_input:
+            X = jnp.log(X)
+        Xs = (X - self.input_mean) / self.input_scale
+        N = Xs.shape[0]
+        Dc = self.closure_parent.shape[0]
+        buf = jnp.ones((Dc, N), dtype=self.dtype)
+        xT = Xs.T
+        offset = 0
+        for size in self.level_sizes:
+            rows = self.level_rows[offset:offset + size]
+            parent = buf[self.closure_parent[rows]]
+            var = xT[self.closure_var[rows]]
+            buf = buf.at[rows].set(parent * var)
+            offset += size
+        Phi = buf[self.select].T
+        Y = Phi @ self.coeffs
+        if self.log_output:
+            Y = jnp.exp(Y)
+        return Y[0] if single else Y
+
+    def __call__(self, X):
+        """jax.jit-evaluated prediction (the arrays of self are arguments)."""
+        return _JITTED_EVALUATE(self, X)
+
+    def value_and_grad(self, X, *, sum_outputs=True):
+        f = (lambda x: self.evaluate(x).sum()) if sum_outputs else self.evaluate
+        return jax.value_and_grad(f)(X)
+
+    def jacobian(self, X):
+        return jax.jacfwd(self.evaluate)(X)
+
+    def hessian(self, X):
+        return jax.hessian(lambda x: self.evaluate(x).sum())(X)
+
+    @classmethod
+    def from_polyemu(cls, emulator, *, direction="forward", dtype=None):
+        if direction not in ("forward", "backward"):
+            raise ValueError(f"direction must be forward or backward, got {direction!r}")
+        if dtype is None:
+            dtype = jnp.float64
+        if dtype == jnp.float64 and not jax.config.jax_enable_x64:
+            raise ValueError(
+                "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
+                "float64; enable x64 or pass dtype=jnp.float32 explicitly."
+            )
+        if direction == "forward":
+            if not hasattr(emulator, "forward_coeffs"):
+                raise ValueError("the JAX backend needs a forward emulator")
+            coeffs = emulator.forward_coeffs_folded
+            plan = emulator.forward_plan
+            input_mean = emulator.scaler_X.mean_
+            input_scale = emulator.scaler_X.scale_
+            box = emulator.X_box_
+            log_input = False
+            log_output = bool(emulator.log_Y)
+            in_dim, out_dim = int(emulator.n_params), int(emulator.n_outputs)
+        else:
+            if not hasattr(emulator, "backward_coeffs"):
+                raise ValueError("the JAX backend needs a backward emulator")
+            coeffs = emulator.backward_coeffs_folded
+            plan = emulator.backward_plan
+            input_mean = emulator.scaler_Y.mean_
+            input_scale = output_scale(emulator.scaler_Y, emulator.n_outputs)
+            box = emulator.Y_box_
+            log_input = bool(emulator.log_Y)
+            log_output = False
+            in_dim, out_dim = int(emulator.n_outputs), int(emulator.n_params)
+        levels = plan.levels
+        level_sizes = tuple(int(a.shape[0]) for a in levels)
+        level_rows = np.concatenate(levels) if levels else np.zeros(0, dtype=np.int64)
+        return cls(
+            coeffs=jnp.asarray(coeffs, dtype=dtype),
+            input_mean=jnp.asarray(input_mean, dtype=dtype),
+            input_scale=jnp.asarray(input_scale, dtype=dtype),
+            box_lo=jnp.asarray(box.lo, dtype=dtype),
+            box_hi=jnp.asarray(box.hi, dtype=dtype),
+            closure_parent=jnp.asarray(plan.parent, dtype=jnp.int32),
+            closure_var=jnp.asarray(plan.var, dtype=jnp.int32),
+            level_rows=jnp.asarray(level_rows, dtype=jnp.int32),
+            select=jnp.asarray(plan.select, dtype=jnp.int32),
+            n_params=in_dim,
+            n_outputs=out_dim,
+            dmax=int(plan.max_degree),
+            level_sizes=level_sizes,
+            log_input=log_input,
+            log_output=log_output,
+            direction=direction,
+            dtype=dtype,
+        )
+
+
+jax.tree_util.register_dataclass(
+    JaxEmulator,
+    data_fields=[
+        "coeffs",
+        "input_mean",
+        "input_scale",
+        "box_lo",
+        "box_hi",
+        "closure_parent",
+        "closure_var",
+        "level_rows",
+        "select",
+    ],
+    meta_fields=[
+        "n_params",
+        "n_outputs",
+        "dmax",
+        "level_sizes",
+        "log_input",
+        "log_output",
+        "direction",
+        "dtype",
+    ],
+)
+
+
+def create_jax_emulator(emulator, *, dtype=None):
+    """Convert a fitted PolyEmu to a jax.jit callable (legacy shim, P2.1).
+
+    ``legacy_positional`` keeps the old signature; the returned JaxEmulator is
+    callable exactly like the old closure and also exposes evaluate(),
+    value_and_grad(), jacobian() and hessian().
     """
+    return JaxEmulator.from_polyemu(emulator, direction="forward", dtype=dtype)
+
+
+def evaluate_monomials_jax_static(X_scaled, multi_indices):
+    """Legacy static-exponent monomial build (kept for the P0.8 tests)."""
     X_scaled = jnp.asarray(X_scaled)
     if X_scaled.ndim == 1:
         X_scaled = X_scaled.reshape(1, -1)
     N = X_scaled.shape[0]
-    mi = np.asarray(multi_indices)
     columns = []
-    for alpha in mi:
+    for alpha in np.asarray(multi_indices):
         monomial = jnp.ones(N, dtype=X_scaled.dtype)
         for i, deg in enumerate(alpha):
             if deg > 0:
@@ -38,74 +218,20 @@ def evaluate_monomials_jax_static(X_scaled, multi_indices, *, x64=None):
     return jnp.stack(columns, axis=1)
 
 
-def create_jax_emulator(emulator):
-    """Return a jitted JAX function equivalent to forward_emulator.
-
-    Raises NotImplementedError for a log_Y fit (the backend would otherwise
-    return log Y) and ValueError when the emulator has no forward coefficients.
-    """
-    check_backend_supports(emulator, "jax")
-
-    coeffs = jnp.asarray(emulator.forward_coeffs)
-    multi_indices = np.asarray(emulator.forward_multi_indices)
-    input_mean = jnp.asarray(emulator.scaler_X.mean_)
-    input_scale = jnp.asarray(emulator.scaler_X.scale_)
-    output_mean = jnp.asarray(emulator.scaler_Y.mean_)
-    output_scale_ = jnp.asarray(output_scale(emulator.scaler_Y, emulator.n_outputs))
-    n_params = int(emulator.n_params)
-    n_outputs = int(emulator.n_outputs)
-
-    @jax.jit
-    def jax_emulator(X):
-        X = jnp.asarray(X)
-        if X.ndim == 0:
-            if n_params != 1:
-                raise ValueError(
-                    f"scalar input given but the emulator has n_params = {n_params}"
-                )
-            single = True
-            X = X.reshape(1, 1)
-        elif X.ndim == 1:
-            if X.shape[0] != n_params:
-                raise ValueError(
-                    f"1-D input has {X.shape[0]} elements; expected n_params = "
-                    f"{n_params}. A 1-D array is a single sample only when its "
-                    f"length equals n_params; pass a 2-D (N, n_params) array "
-                    f"otherwise."
-                )
-            single = True
-            X = X.reshape(1, n_params)
-        else:
-            if X.shape[-1] != n_params:
-                raise ValueError(
-                    f"input has {X.shape[-1]} elements along its last axis; "
-                    f"expected n_params = {n_params}"
-                )
-            single = False
-        X_scaled = (X - input_mean) / input_scale
-        Phi = evaluate_monomials_jax_static(X_scaled, multi_indices)
-        Y = Phi @ coeffs * output_scale_ + output_mean
-        if single:
-            Y = Y[0]
-        return Y
-
-    return jax_emulator
-
-
 def demo_jax_autodiff():
-    """Demonstrate JAX gradients on a small quadratic emulator."""
+    """Demonstrate the JAX backend on a small quadratic emulator."""
     from MomentEmu.PolyEmu import PolyEmu
 
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(42)
     X = rng.uniform(-1, 1, (200, 2))
     Y = (X[:, 0] ** 2 + X[:, 1] ** 2).reshape(-1, 1)
-    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=2, dim_reduction=False)
+    emu = PolyEmu(X, Y, max_degree_forward=2, verbose=0)
     f = create_jax_emulator(emu)
     x = jnp.array([0.5, 0.3])
     print("prediction:", f(x))
-    print("gradient:", jax.grad(lambda v: f(v).sum())(x))
-    print("hessian:", jax.hessian(lambda v: f(v).sum())(x))
+    print("gradient:", f.value_and_grad(x)[1])
+    print("hessian:", f.hessian(x))
 
 
 if __name__ == "__main__":

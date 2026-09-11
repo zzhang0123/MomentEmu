@@ -406,7 +406,7 @@ def test_jax_float32_default_silent():
     rng = np.random.default_rng(40)
     X = rng.uniform(-1.0, 1.0, (200, 2))
     Y = (X[:, 0] ** 2).reshape(-1, 1)
-    e = PolyEmu(X, Y, max_degree_forward=2, verbose=0)
+    e = PolyEmu(X, Y, max_degree_forward=3, verbose=0)
     je = JaxEmulator.from_polyemu(e)
     assert je.dtype == jax.numpy.float64
     assert "enable_x64" in inspect.getsource(JaxEmulator.from_polyemu)

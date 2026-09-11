@@ -49,6 +49,11 @@ from MomentEmu.monomials import (
 # so a single degree rung can otherwise allocate tens of GB.
 MAX_BACKWARD_MOMENT_BYTES = 1 << 30  # 1 GiB
 
+# P5.2: default number of training rows per moment-build chunk. A cache-sized
+# constant keeps the batched build enabled by default instead of one all-N
+# batch that disables batching for every realistic N.
+DEFAULT_BATCH_SIZE = 512
+
 logger = logging.getLogger("MomentEmu")
 logger.addHandler(logging.NullHandler())
 
@@ -585,6 +590,9 @@ class PolyEmu:
     backward_max_frac_err: float | None = None
     forward_frac_err_diag: dict | None = None
     backward_frac_err_diag: dict | None = None
+    # True when the last forward sweep grew the moment system incrementally
+    # (P5.1); overridden per instance after a fit.
+    forward_sweep_incremental_: bool = False
 
     @property
     def foward_degree(self):
@@ -773,6 +781,7 @@ class PolyEmu:
         configure_logging(verbose)
         self.loo_rmse_ = None
         self.leverage_max_train_ = None
+        self.forward_sweep_incremental_ = False
         # Training box (P1.6): raw min/max/std per parameter and per output.
         self.X_box_ = fit_domain_box(X)
         self.Y_box_ = fit_domain_box(Y)
@@ -790,7 +799,8 @@ class PolyEmu:
             )
 
         if batch_size is None:
-            batch_size = X.shape[0]
+            batch_size = DEFAULT_BATCH_SIZE
+        self.batch_size_ = int(batch_size)
 
         use_loo = X_test is None
         if use_loo:
@@ -1032,6 +1042,75 @@ class PolyEmu:
         _y_rms = float(np.sqrt(np.mean(np.asarray(_ref_Y) ** 2)))
         rmse_ref = _y_rms if _y_rms > 0 else 1.0
 
+        # P5.1: grow the moment system by bordering the previous degree block
+        # instead of rebuilding Phi, M and nu from scratch at every rung. The
+        # index sets are nested, so the previous rows are a prefix of the new
+        # set and the Gram matrix gains a border.
+        _N_train = X_train_scaled.shape[0]
+        if weights is None:
+            _w_norm = None
+        else:
+            _w_norm = np.asarray(weights, dtype=np.float64).reshape(-1)
+            if _w_norm.shape[0] != _N_train:
+                raise ValueError(f"weights has {_w_norm.shape[0]} entries, expected {_N_train}")
+            if np.any(_w_norm < 0):
+                raise ValueError("weights must be non-negative")
+            _w_norm = _w_norm / _w_norm.mean()
+        _inc: dict[str, Any] = {
+            "indices": None,
+            "phi": None,
+            "phiw": None,
+            "M": None,
+            "nu": None,
+        }
+        _used_incremental = False
+
+        def _moments(idx):
+            """Moment products for idx, bordering the previous rung when possible."""
+            nonlocal _used_incremental
+            prev = _inc["indices"]
+            if (
+                prev is not None
+                and prev.shape[0] <= idx.shape[0]
+                and np.array_equal(idx[: prev.shape[0]], prev)
+            ):
+                new = idx[prev.shape[0]:]
+                if new.shape[0]:
+                    Phi_new = MonomialPlan.build(new).evaluate(X_train_scaled)
+                else:
+                    Phi_new = np.empty((_N_train, 0))
+                Phi = np.hstack([_inc["phi"], Phi_new])
+                if _w_norm is None:
+                    cross = _inc["phi"].T @ Phi_new
+                    M = np.block([
+                        [_inc["M"], cross / _N_train],
+                        [cross.T / _N_train, (Phi_new.T @ Phi_new) / _N_train],
+                    ])
+                    nu = np.vstack([_inc["nu"], (Phi_new.T @ Y_train_scaled) / _N_train])
+                else:
+                    PhiW_new = Phi_new * _w_norm[:, None]
+                    cross = _inc["phiw"].T @ Phi_new
+                    M = np.block([
+                        [_inc["M"], cross / _N_train],
+                        [cross.T / _N_train, (PhiW_new.T @ Phi_new) / _N_train],
+                    ])
+                    nu = np.vstack(
+                        [_inc["nu"], (PhiW_new.T @ Y_train_scaled) / _N_train]
+                    )
+                _used_incremental = True
+            else:
+                M, nu = compute_moments_vector_output_batched(
+                    X_train_scaled, Y_train_scaled, idx,
+                    batch_size=batch_size, weights=weights,
+                )
+                Phi = MonomialPlan.build(idx).evaluate(X_train_scaled)
+            _inc["indices"] = idx
+            _inc["phi"] = Phi
+            _inc["phiw"] = None if _w_norm is None else Phi * _w_norm[:, None]
+            _inc["M"] = M
+            _inc["nu"] = nu
+            return M, nu, Phi
+
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
 
@@ -1080,11 +1159,7 @@ class PolyEmu:
                 # Fit on all N and score by exact leave-one-out PRESS from the
                 # same Cholesky factor (P1.5). The metric in RMSE_val_list is
                 # the LOO-RMSE, so selection is uniform.
-                _plan = MonomialPlan.build(multi_indices)
-                Phi = _plan.evaluate(X_train_scaled)
-                M, nu = generate_moment_products(
-                    Phi, Y_train_scaled, weights=weights
-                )
+                M, nu, Phi = _moments(multi_indices)
                 coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
                     M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d,
                     weights=weights,
@@ -1099,16 +1174,13 @@ class PolyEmu:
                 leverage_list.append(lev_max)
                 metric = loo_rmse
             else:
-                M, nu = compute_moments_vector_output_batched(
-                    X_train_scaled, Y_train_scaled, multi_indices,
-                    batch_size=batch_size, weights=weights,
-                )
+                M, nu, Phi = _moments(multi_indices)
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
                 )
                 if cond >= COND_RAISE:
                     # P5.4: refit this rung with CholeskyQR2 / Householder QR.
-                    _Phi_qr = MonomialPlan.build(multi_indices).evaluate(X_train_scaled)
+                    _Phi_qr = Phi
                     _c_qr, _cond_qr = solve_emulator_coefficients(
                         M, nu, on_singular="warn", degree=d, return_cond=True,
                         Phi=_Phi_qr, Y=Y_train_scaled,
@@ -1186,6 +1258,7 @@ class PolyEmu:
         self.forward_BIC_list = BIC_list
         self.forward_running_time_list = running_time_list
         self.forward_degree_list = degree_list
+        self.forward_sweep_incremental_ = bool(_used_incremental)
         # Metrics of the model actually stored (the old dim_reduction path
         # reported the pre-pruning model).
         self.forward_RMSE = float(RMSE_val_list[ind])
@@ -2106,6 +2179,113 @@ class PolyEmu:
         else:
             X_pred = X_pred.reshape(Yshape[:-1] + (self.n_params,))
         return X_pred
+
+    def backward_pca(
+        self,
+        rank: int = 8,
+        degree: int = 3,
+        *,
+        X: Any | None = None,
+        Y: Any | None = None,
+        X_val: Any | None = None,
+        Y_val: Any | None = None,
+        fill: float = 2.0,
+    ) -> PolyEmu:
+        """Fit X from the top-rank principal components of Y (P5.8).
+
+        The transformed, standardized outputs are reduced to their top-rank
+        principal components (whitened), and a total-degree polynomial is fit
+        from those components to the standardized inputs. Returns E[X | Y] for
+        non-injective maps and records per-parameter validation R^2 in
+        backward_R2_per_parameter_, flagging parameters with R^2 <= 0 in
+        backward_unconstrained_parameters_. Fails when the polynomial would
+        exceed N_train / fill terms.
+        """
+        if int(rank) < 1:
+            raise ValueError("rank must be >= 1")
+        X = as_float64(np.asarray(self._X_data if X is None else X), "X")
+        Y = as_float64(np.asarray(self._Y_data if Y is None else Y), "Y")
+        transform = self._transforms()
+        y_scale = self.scaler_Y.scale_
+        if y_scale is None:
+            y_scale = np.ones(self.n_outputs)
+        Yt = _transform_forward(Y, transform)
+        Ys = (Yt - self.scaler_Y.mean_) / y_scale
+        Xs = self.scaler_X.transform(X)
+        y_mean = Ys.mean(axis=0)
+        Yc = Ys - y_mean
+        U, S, Vt = np.linalg.svd(Yc, full_matrices=False)
+        k = int(rank)
+        if k > Vt.shape[0]:
+            raise ValueError(f"rank {k} exceeds the number of Y components ({Vt.shape[0]})")
+        if np.any(S[:k] <= 0.0):
+            raise ValueError("cannot whiten a zero-variance principal component")
+        root_n = float(np.sqrt(max(Yc.shape[0] - 1, 1)))
+        scores = U[:, :k] * root_n
+        mi = generate_multi_indices(k, int(degree))
+        n_terms = int(mi.shape[0])
+        check_sample_count(Ys.shape[0], n_terms, degree=int(degree), n_params=k, fill=fill)
+        plan = MonomialPlan.build(mi)
+        M, nu = generate_moment_products(plan.evaluate(scores), Xs)
+        coeffs, cond = solve_emulator_coefficients(
+            M, nu, on_singular="warn", degree=int(degree), return_cond=True
+        )
+        if not np.isfinite(coeffs).all():
+            raise IllConditionedError("the backward PCA fit produced non-finite coefficients")
+        if X_val is None or Y_val is None:
+            Xv_s, Yv = Xs, Y
+        else:
+            Xv_s = self.scaler_X.transform(as_float64(np.asarray(X_val), "X_val"))
+            Yv = as_float64(np.asarray(Y_val), "Y_val")
+        Yv_s = (_transform_forward(Yv, transform) - self.scaler_Y.mean_) / y_scale
+        scores_v = (Yv_s - y_mean) @ Vt[:k].T / S[:k] * root_n
+        pred = plan.evaluate(scores_v) @ coeffs
+        ss_res = np.sum((pred - Xv_s) ** 2, axis=0)
+        ss_tot = np.sum((Xv_s - Xv_s.mean(axis=0)) ** 2, axis=0)
+        r2 = 1.0 - ss_res / np.where(ss_tot > 0.0, ss_tot, 1.0)
+        self.backward_pca_ = {
+            "rank": k,
+            "degree": int(degree),
+            "n_terms": n_terms,
+            "components": Vt[:k],
+            "y_mean": y_mean,
+            "score_scale": root_n / S[:k],
+            "coeffs": coeffs,
+            "multi_indices": mi,
+            "cond": float(cond),
+        }
+        self.backward_pca_rank_ = k
+        self.backward_pca_degree_ = int(degree)
+        self.backward_pca_n_terms_ = n_terms
+        self.backward_pca_cond_ = float(cond)
+        self.backward_R2_per_parameter_ = np.asarray(r2)
+        self.backward_unconstrained_parameters_ = [
+            int(i) for i in np.nonzero(np.asarray(r2) <= 0.0)[0]
+        ]
+        return self
+
+    def backward_pca_predict(self, Y: Any, batch_size: int | None = None) -> np.ndarray:
+        """Evaluate the backward PCA fit at Y (E[X | Y]; P5.8)."""
+        if getattr(self, "backward_pca_", None) is None:
+            raise RuntimeError("call backward_pca() before backward_pca_predict()")
+        info = self.backward_pca_
+        Y = np.asarray(Y)
+        single = Y.ndim == 1
+        if single:
+            Y = Y.reshape(1, -1)
+        transform = self._transforms()
+        y_scale = self.scaler_Y.scale_
+        if y_scale is None:
+            y_scale = np.ones(self.n_outputs)
+        Ys = (_transform_forward(Y, transform) - self.scaler_Y.mean_) / y_scale
+        scores = (Ys - info["y_mean"]) @ info["components"].T * info["score_scale"][None, :]
+        plan = MonomialPlan.build(info["multi_indices"])
+        Xs = plan.evaluate(scores) @ info["coeffs"]
+        scale = self.scaler_X.scale_
+        if scale is None:
+            scale = np.ones(self.n_params)
+        X_pred = Xs * scale[None, :] + self.scaler_X.mean_[None, :]
+        return X_pred[0] if single else X_pred
 
     def generate_forward_symb_emu(self, variable_names=None, *, raw_units=False):
         """SymPy expressions for the forward emulator (P2.4, D11).

@@ -411,7 +411,6 @@ def test_no_output_basis_reduction():
     assert hasattr(PolyEmu, "fingerprint")
 
 
-@pytest.mark.xfail(strict=True, reason="P5.8 backward PCA")
 def test_inverse_returns_conditional_mean():
     assert hasattr(PolyEmu, "backward_pca")
 
@@ -430,12 +429,10 @@ def test_jax_float32_default_silent():
     assert "enable_x64" in inspect.getsource(JaxEmulator.from_polyemu)
 
 
-@pytest.mark.xfail(strict=True, reason="P5.1 incremental sweep")
 def test_degree_sweep_rebuilds_moments():
     assert hasattr(PolyEmu, "forward_sweep_incremental_")
 
 
-@pytest.mark.xfail(strict=True, reason="P5.1 incremental sweep")
 def test_solve_redone_each_degree_no_cholesky():
     assert hasattr(PolyEmu, "forward_sweep_incremental_")
 
@@ -471,7 +468,6 @@ def test_notebook_test_uses_removed_parameter():
     assert "RMSE_lower" not in Path("tests/test_inhomo.ipynb").read_text()
 
 
-@pytest.mark.xfail(strict=True, reason="P5.2 batched training build")
 def test_batch_size_default_disables_batching():
     rng = np.random.default_rng(17)
     X = rng.uniform(-1.0, 1.0, (1000, 3))

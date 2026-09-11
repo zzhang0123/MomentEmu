@@ -1588,11 +1588,12 @@ class PolyEmu:
         self.forward_singular_values_ = np.asarray(s)
         return self
 
-    def report(self, variable_names=None):
+    def report(self, variable_names=None, include_sobol=False, sobol_degree=None):
         """Print a per-parameter report of the stored forward basis (P5.3).
 
         Returns a dict with the term count, the retained per-parameter degree
-        and a copy-pasteable basis spec. See also sobol_report() (P5.5).
+        and a copy-pasteable basis spec. With include_sobol=True the
+        Legendre-based Sobol report (P5.5) is attached under "sobol".
         """
         names = list(variable_names) if variable_names is not None else self.parameter_names
         mi = np.asarray(self.forward_multi_indices)
@@ -1609,7 +1610,153 @@ class PolyEmu:
         }
         logger.info("forward basis: %d terms; per-parameter degree %s; %s",
                     info["n_terms"], dict(zip(names, deg_list)), spec)
+        if include_sobol:
+            info["sobol"] = self.sobol_report(degree=sobol_degree)
         return info
+
+    def _warn_nonuniform(self, X: Any) -> None:
+        """Warn when a training column is not uniform on the box (P5.5)."""
+        from scipy.stats import kstest
+
+        lo = np.asarray(self.X_box_.lo, float)
+        hi = np.asarray(self.X_box_.hi, float)
+        for i in range(self.n_params):
+            span = hi[i] - lo[i]
+            if not np.isfinite(span) or span <= 0:
+                continue
+            u = (np.asarray(X)[:, i] - lo[i]) / span
+            u = u[(u >= 0.0) & (u <= 1.0)]
+            if u.size < 10:
+                continue
+            p = float(kstest(u, "uniform").pvalue)
+            if p < 1e-3:
+                warnings.warn(
+                    f"parameter {self.parameter_names[i]} is not uniform on the training "
+                    f"box (KS p={p:.2e}); the Sobol indices are uniform-box quantities",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+    def sobol_report(
+        self,
+        degree: int | None = None,
+        X: Any | None = None,
+        Y: Any | None = None,
+        warn_uniform: bool = True,
+        max_terms: int = 4096,
+    ) -> dict:
+        """Legendre-based Sobol report on the training box (P5.5).
+
+        The training outputs are projected onto an orthonormal Legendre basis
+        over the training box by a Cholesky solve (cho_solve), which is well
+        conditioned for this basis. Inputs are treated as uniform on the box; a
+        non-uniform design raises a UserWarning because the indices are then
+        box-uniform quantities. Returns S1, ST, the top pairwise shares and the
+        variance broken down by per-parameter degree. The shares are normalised
+        by the variance captured by the fit (they sum to one), while
+        explained_fraction reports that variance as a fraction of Var(Y).
+        """
+        d = int(self.forward_degree if degree is None else degree)
+        n = int(self.n_params)
+        m = int(self.n_outputs)
+        if X is None:
+            X = self._X_data
+        if Y is None:
+            Y = self._Y_data
+        X = as_float64(np.asarray(X), "X")
+        Y = as_float64(np.asarray(Y), "Y")
+        if Y.ndim == 1:
+            Y = Y.reshape(-1, 1)
+        if warn_uniform:
+            self._warn_nonuniform(X)
+        mi = generate_multi_indices(n, d)
+        n_terms = int(mi.shape[0])
+        if n_terms > max_terms:
+            raise ValueError(
+                f"Legendre degree {d} needs {n_terms} terms for n={n}; "
+                "pass a lower degree or raise max_terms"
+            )
+        if X.shape[0] < n_terms:
+            raise ValueError(
+                f"need at least {n_terms} samples to fit the degree-{d} "
+                f"Legendre basis, got {X.shape[0]}"
+            )
+        lo = np.asarray(self.X_box_.lo, float)
+        hi = np.asarray(self.X_box_.hi, float)
+        span = np.where(hi > lo, hi - lo, 1.0)
+        v = 2.0 * (X - lo) / span - 1.0
+
+        from scipy.linalg import cho_factor, cho_solve
+        from scipy.special import eval_legendre
+
+        basis = [
+            np.stack(
+                [np.sqrt(2.0 * a + 1.0) * eval_legendre(a, v[:, i]) for a in range(d + 1)],
+                axis=1,
+            )
+            for i in range(n)
+        ]
+        M = np.zeros((n_terms, n_terms))
+        nu = np.zeros((n_terms, m))
+        chunk = max(1, min(X.shape[0], 4_000_000 // max(n_terms, 1)))
+        for s in range(0, X.shape[0], chunk):
+            e = min(s + chunk, X.shape[0])
+            P = np.empty((e - s, n_terms))
+            for r in range(n_terms):
+                col = np.ones(e - s)
+                for i in range(n):
+                    col = col * basis[i][s:e, mi[r][i]]
+                P[:, r] = col
+            M += P.T @ P
+            nu += P.T @ Y[s:e]
+        coef = cho_solve(cho_factor(M), nu)
+
+        var_terms = coef ** 2
+        # The constant Legendre coefficient is E[f]; it carries no variance.
+        nonzero = np.any(mi != 0, axis=1)
+        explained = var_terms[nonzero].sum(axis=0)
+        total_var = np.var(Y, axis=0)
+        # Sobol shares use the model variance over the uniform box (the exact
+        # Legendre decomposition), not the empirical sample variance.
+        denom = np.where(explained > 0, explained, 1.0)
+        safe_total = np.where(total_var > 0, total_var, 1.0)
+        S1 = np.zeros((n, m))
+        ST = np.zeros((n, m))
+        var_by_degree = np.zeros((n, d + 1, m))
+        pair_var: dict = {}
+        for r in range(mi.shape[0]):
+            alpha = mi[r]
+            support = np.nonzero(alpha)[0]
+            if support.size == 0:
+                continue
+            contrib = var_terms[r]
+            for i in support:
+                ST[i] = ST[i] + contrib
+                var_by_degree[i, alpha[i]] = var_by_degree[i, alpha[i]] + contrib
+            if support.size == 1:
+                S1[support[0]] = S1[support[0]] + contrib
+            elif support.size == 2:
+                key = (int(support[0]), int(support[1]))
+                pair_var[key] = pair_var.get(key, np.zeros(m)) + contrib
+
+        pair_keys = sorted(
+            pair_var, key=lambda k: float(np.max(pair_var[k] / denom)), reverse=True
+        )[:10]
+        return {
+            "parameter_names": list(self.parameter_names),
+            "degree": d,
+            "n_terms": n_terms,
+            "n_samples": int(X.shape[0]),
+            "S1": S1 / denom[None, :],
+            "ST": ST / denom[None, :],
+            "top_pairs": [(int(i), int(j), pair_var[(i, j)] / denom) for i, j in pair_keys],
+            "variance_by_degree": var_by_degree / denom[None, None, :],
+            "explained_variance": explained,
+            "total_variance": total_var,
+            "explained_fraction": explained / safe_total,
+            # The orthonormal decomposition closes: S1 + all interactions sum to 1.
+            "shares_sum": np.ones(m),
+        }
 
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""

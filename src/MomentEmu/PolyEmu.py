@@ -1046,6 +1046,8 @@ class PolyEmu():
         arr = np.asarray(X, dtype=np.float64)
         if arr.ndim == 1:
             arr = arr[None, :]
+        if not hasattr(self, "_inv_scale_X"):
+            self._inv_scale_X = 1.0 / self.scaler_X.scale_
         Xs = (arr - self.scaler_X.mean_) * self._inv_scale_X
         Phi = self.forward_plan.evaluate(Xs)
         cf, lower = self.forward_chol_
@@ -1064,7 +1066,10 @@ class PolyEmu():
         arr = np.asarray(X, dtype=np.float64)
         single = arr.ndim == 1
         arr = np.atleast_2d(arr)
-        self._check_box(arr, self.X_box_, "ignore", "input")
+        if hasattr(self, "X_box_"):
+            self._check_box(arr, self.X_box_, "ignore", "input")
+        if not hasattr(self, "_inv_scale_X"):
+            self._inv_scale_X = 1.0 / self.scaler_X.scale_
         if getattr(self, "forward_plan", None) is None:
             self._build_forward_plan()
         Xs = (arr - self.scaler_X.mean_) * self._inv_scale_X
@@ -1143,6 +1148,89 @@ class PolyEmu():
             result["max_abs_over_sigma"],
         )
         return result
+
+    def _whiten(self, J, r, *, sigma=None, cov=None):
+        """Whiten J (m, n) and r (m,) with C = diag(sigma^2) or cov (m, m)."""
+        from scipy.linalg import solve_triangular
+
+        if cov is not None:
+            L = np.linalg.cholesky(np.asarray(cov, dtype=np.float64))
+            # Jw = L^-1 J and rw = L^-1 r, so Jw^T Jw = J^T C^-1 J.
+            Jw = solve_triangular(L, J, lower=True, check_finite=False)
+            rw = solve_triangular(L, r, lower=True, check_finite=False)
+        else:
+            sig = np.asarray(sigma, dtype=np.float64)
+            if sig.ndim == 0:
+                sig = np.full(J.shape[0], float(sig))
+            Jw = J / sig[:, None]
+            rw = r / sig
+        return Jw, rw
+
+    def posterior_bias(self, theta, Y_true, *, sigma=None, cov=None):
+        """Linearised posterior mean shift at a point (P3.2, mode b).
+
+        Delta = -(J^T C^-1 J)^-1 J^T C^-1 (emu(theta) - Y_true), with J from
+        :meth:`jacobian`.  Returns the parameter shift, the marginal shift in
+        posterior-sigma units and the Mahalanobis norm sqrt(Delta^T F Delta),
+        with F = J^T C^-1 J.  This is the exact GLS mean shift for a linear
+        model and an offset residual.
+        """
+        if (sigma is None) == (cov is None):
+            raise ValueError("posterior_bias requires exactly one of sigma or cov")
+        theta = np.asarray(theta, dtype=np.float64)
+        Y_true = np.asarray(Y_true, dtype=np.float64).ravel()
+        J = np.atleast_2d(self.jacobian(theta))
+        r = self.forward_emulator(theta, extrapolation="ignore").ravel() - Y_true
+        Jw, rw = self._whiten(J, r, sigma=sigma, cov=cov)
+        F = Jw.T @ Jw
+        delta = -np.linalg.solve(F, Jw.T @ rw)
+        cov_d = np.linalg.inv(F)
+        sd = np.sqrt(np.diag(cov_d))
+        mahalanobis = float(np.sqrt(delta @ F @ delta))
+        return {
+            "delta": delta,
+            "marginal_sd": sd,
+            "marginal_shift": delta / sd,
+            "max_marginal_shift": float(np.max(np.abs(delta / sd))),
+            "mahalanobis": mahalanobis,
+        }
+
+    def posterior_bias_map(self, X_val, Y_val, *, sigma=None, cov=None, threshold=0.1):
+        """Linearised bias over validation points (P3.2, mode a).
+
+        Y_val must be the true simulator values, so r is the emulator error.
+        Returns the median, p99 and fraction above ``threshold`` of the
+        per-point maximum marginal shift, plus the same for the Mahalanobis
+        norm.
+        """
+        if (sigma is None) == (cov is None):
+            raise ValueError("posterior_bias_map requires exactly one of sigma or cov")
+        X_val = np.asarray(X_val, dtype=np.float64)
+        Y_val = np.asarray(Y_val, dtype=np.float64)
+        N = X_val.shape[0]
+        Jv = np.stack([np.atleast_2d(self.jacobian(X_val[i])) for i in range(N)])
+        rv = self.forward_emulator(X_val, extrapolation="ignore") - Y_val
+        Jw_list, rw_list = [], []
+        for i in range(N):
+            Jw, rw = self._whiten(Jv[i], rv[i], sigma=sigma, cov=cov)
+            Jw_list.append(Jw)
+            rw_list.append(rw)
+        Jw = np.stack(Jw_list)
+        rw = np.stack(rw_list)
+        F = np.einsum("nmi,nmj->nij", Jw, Jw)
+        rhs = np.einsum("nmi,nm->ni", Jw, rw)
+        delta = -np.linalg.solve(F, rhs[..., None])[..., 0]
+        sd = np.sqrt(np.diagonal(np.linalg.inv(F), axis1=1, axis2=2))
+        marginal = np.max(np.abs(delta / sd), axis=1)
+        mahalanobis = np.sqrt(np.einsum("ni,nij,nj->n", delta, F, delta))
+        return {
+            "n": int(N),
+            "marginal_median": float(np.median(marginal)),
+            "marginal_p99": float(np.percentile(marginal, 99)),
+            "marginal_frac_above": float(np.mean(marginal > threshold)),
+            "mahalanobis_median": float(np.median(mahalanobis)),
+            "mahalanobis_p99": float(np.percentile(mahalanobis, 99)),
+        }
 
     def _check_box(self, X, box: DomainBox, extrapolation: str, label: str) -> None:
         if extrapolation not in ("warn", "raise", "ignore"):

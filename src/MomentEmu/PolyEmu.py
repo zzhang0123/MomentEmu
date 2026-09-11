@@ -141,6 +141,39 @@ def _transform_codes(transform):
     return tuple(codes)
 
 
+def refit_zoom(
+    emulator,
+    simulator,
+    mean,
+    sd,
+    *,
+    k=6.0,
+    n_samples=None,
+    seed=0,
+    **kwargs,
+):
+    """Two-stage zoom refit around a posterior (P3.4).
+
+    Samples the simulator uniformly in ``mean +/- k sd`` and fits a new
+    PolyEmu there.  ``simulator`` takes an (N, n) array and returns (N,) or
+    (N, m).  After the second-stage fit, check the posterior shift with
+    :meth:`PolyEmu.posterior_bias`.
+    """
+    import numpy as _np
+
+    mean = _np.asarray(mean, dtype=_np.float64)
+    sd = _np.asarray(sd, dtype=_np.float64)
+    n = mean.shape[0]
+    if n_samples is None:
+        n_samples = max(2000, 30 * n)
+    rng = _np.random.default_rng(seed)
+    X = rng.uniform(mean - k * sd, mean + k * sd, (n_samples, n))
+    Y = _np.asarray(simulator(X), dtype=_np.float64)
+    if Y.ndim == 1:
+        Y = Y[:, None]
+    return PolyEmu(X, Y, **kwargs)
+
+
 def given_order_indices(n, d):
     """Generate all multi-indices α with total degree = d.
     
@@ -1376,6 +1409,26 @@ class PolyEmu():
         if extrapolation == "raise":
             raise ValueError(msg)
         warnings.warn(msg, ExtrapolationWarning, stacklevel=3)
+
+    def refit(self, X, Y, box=None, **kwargs):
+        """Fit a new emulator on (X, Y), optionally restricted to a box (P3.4).
+
+        ``box`` is a (lo, hi) pair of per-parameter arrays; only training rows
+        inside it are used. This is the second stage of the zoom recipe: fit on
+        the prior box, run a chain, then refit on the posterior mean +/- k sd.
+        """
+        X = np.asarray(X, dtype=np.float64)
+        Y = np.asarray(Y, dtype=np.float64)
+        if box is not None:
+            lo, hi = np.asarray(box[0], float), np.asarray(box[1], float)
+            mask = np.all((X >= lo) & (X <= hi), axis=1)
+            if int(mask.sum()) < 2:
+                raise ValueError(
+                    f"only {int(mask.sum())} training row(s) fall inside the refit "
+                    f"box; widen it or supply more samples."
+                )
+            X, Y = X[mask], Y[mask]
+        return PolyEmu(X, Y, **kwargs)
 
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""

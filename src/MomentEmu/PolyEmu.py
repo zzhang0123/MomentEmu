@@ -64,6 +64,83 @@ def configure_logging(verbose: int = 1) -> None:
 
 ####### Multi-index generation and operations ####
 
+# ---------------------------------------------------------------------------
+# Per-output transform (P3.6, D4)
+# ---------------------------------------------------------------------------
+TRANSFORM_CODES = {"linear": 0, "log": 1, "asinh": 2}
+
+
+def _normalize_transform(transform, log_Y, m):
+    """Return an (m,) tuple of transform specs (P3.6, D4).
+
+    ``None`` maps to all "log" when log_Y else all "linear"; a single string is
+    broadcast.  A spec is "linear", "log", "asinh" or a (forward, inverse) pair
+    of callables.
+    """
+    if transform is None:
+        return tuple("log" if log_Y else "linear" for _ in range(m))
+    if isinstance(transform, str):
+        spec = (transform,) * m
+    else:
+        spec = tuple(transform)
+    if len(spec) != m:
+        raise ValueError(f"transform must have {m} entries, got {len(spec)}")
+    for t in spec:
+        if isinstance(t, str):
+            if t not in TRANSFORM_CODES:
+                raise ValueError(
+                    f"unknown transform {t!r}; use linear, log, asinh or a pair"
+                )
+        elif not (isinstance(t, (tuple, list)) and len(t) == 2 and callable(t[0]) and callable(t[1])):
+            raise ValueError(
+                "each transform must be linear/log/asinh or a (forward, inverse) pair"
+            )
+    return spec
+
+
+def _transform_forward(Y, transform):
+    """Apply each column transform forward (Y -> model space)."""
+    out = np.array(Y, dtype=np.float64, copy=True)
+    for j, t in enumerate(transform):
+        if t == "linear":
+            continue
+        if t == "log":
+            out[:, j] = np.log(out[:, j])
+        elif t == "asinh":
+            out[:, j] = np.arcsinh(out[:, j])
+        else:
+            out[:, j] = t[0](out[:, j])
+    return out
+
+
+def _transform_inverse(Z, transform):
+    """Apply each column transform inverse (model space -> Y)."""
+    out = np.array(Z, dtype=np.float64, copy=True)
+    for j, t in enumerate(transform):
+        if t == "linear":
+            continue
+        if t == "log":
+            out[:, j] = np.exp(out[:, j])
+        elif t == "asinh":
+            out[:, j] = np.sinh(out[:, j])
+        else:
+            out[:, j] = t[1](out[:, j])
+    return out
+
+
+def _transform_codes(transform):
+    """Integer codes for the backends; callables are not supported there."""
+    codes = []
+    for t in transform:
+        if t not in TRANSFORM_CODES:
+            raise NotImplementedError(
+                "the autodiff backends support linear/log/asinh column transforms "
+                "only; use forward_emulator for a custom (forward, inverse) pair."
+            )
+        codes.append(TRANSFORM_CODES[t])
+    return tuple(codes)
+
+
 def given_order_indices(n, d):
     """Generate all multi-indices α with total degree = d.
     
@@ -255,6 +332,7 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
                                     input_means=None, input_vars=None,
                                     output_means=None, output_vars=None,
                                     *, log_input=False, log_output=False,
+                                    transform=None, input_transform=None,
                                     raw_units=False):
     """Convert emulator coefficients into sympy expressions (P2.4, D11).
 
@@ -290,7 +368,17 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
     substitutions = {}
     for i in range(n):
         xi = vars_sym[i]
-        if log_input:
+        if input_transform is not None:
+            ti = input_transform[i]
+            if ti == "log":
+                xi = sp.log(xi, evaluate=False)
+            elif ti == "asinh":
+                xi = sp.asinh(xi)
+            elif ti != "linear":
+                raise NotImplementedError(
+                    "symbolic export supports linear/log/asinh input transforms"
+                )
+        elif log_input:
             xi = sp.log(xi, evaluate=False)
         substitutions[z_syms[i]] = (
             xi - sp.Float(float(input_mean[i]), 17)
@@ -311,7 +399,17 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
             expr = expr * sp.Float(float(output_std[j]), 17)
         if float(output_mean[j]) != 0.0:
             expr = expr + sp.Float(float(output_mean[j]), 17)
-        if log_output:
+        if transform is not None:
+            tj = transform[j]
+            if tj == "log":
+                expr = sp.exp(expr, evaluate=False)
+            elif tj == "asinh":
+                expr = sp.sinh(expr)
+            elif tj != "linear":
+                raise NotImplementedError(
+                    "symbolic export supports linear/log/asinh output transforms"
+                )
+        elif log_output:
             expr = sp.exp(expr, evaluate=False)
         expressions.append(expr)
     return expressions
@@ -360,15 +458,11 @@ def max_order(n_params, N_samples):
     return max_supported_degree(n_params, N_samples, fill=1.0)
 
 
-def _unscale_val(scaler_X, scaler_Y, X_val_scaled, Y_val_scaled, log_Y):
-    """Invert StandardScaler (and the optional log transform on Y) on a
-    validation tuple. Centralises the three lines that were duplicated at
-    the forward and backward fractional-error sites.
-    """
+def _unscale_val(scaler_X, scaler_Y, X_val_scaled, Y_val_scaled, transform):
+    """Invert StandardScaler and the per-output transform on a validation tuple."""
     X = scaler_X.inverse_transform(X_val_scaled)
     Y = scaler_Y.inverse_transform(Y_val_scaled)
-    if log_Y:
-        Y = np.exp(Y)
+    Y = _transform_inverse(Y, transform)
     return X, Y
 
 
@@ -499,7 +593,8 @@ class PolyEmu():
                 standardize_Y_with_std=True,
                 batch_size=None,
                 random_state=None,
-                verbose=0):
+                verbose=0,
+                transform=None):
         """
         Polynomial emulator class for both forward and backward emulation.
         X: N x n array of input parameters. N is the number of samples, n is the number of parameters.
@@ -526,6 +621,11 @@ class PolyEmu():
         batch_size: batch size for batched computations to manage memory usage.
         random_state: seed passed to the internal train/validation split when
             X_test/Y_test are omitted. Stored as self.random_state.
+        transform: per-output transform (P3.6, D4): "linear", "log", "asinh", a
+            single string broadcast to every column, or a list/array of those
+            (or a (forward, inverse) callable pair). None means "log" for every
+            column when log_Y else "linear". log_Y=True is equivalent to
+            transform="log".
 
         Validation diagnostics
         ----------------------
@@ -587,15 +687,23 @@ class PolyEmu():
             check_finite(X_test, "X_test")
             check_finite(Y_test, "Y_test")
         check_design_columns(X)
-        if log_Y:
-            check_log_domain(Y, "Y")
-            if X_test is not None:
-                check_log_domain(Y_test, "Y_test")
 
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
+        self.transform = _normalize_transform(transform, log_Y, self.n_outputs)
+        # log_Y is kept as the legacy "every column is log" flag.
+        self.log_Y = all(t == "log" for t in self.transform)
+        if self.log_Y:
+            check_log_domain(Y, "Y")
+            if X_test is not None:
+                check_log_domain(Y_test, "Y_test")
+        else:
+            for j, t in enumerate(self.transform):
+                if t == "log":
+                    check_log_domain(Y[:, j:j + 1], f"Y column {j}")
+                    if X_test is not None:
+                        check_log_domain(Y_test[:, j:j + 1], f"Y_test column {j}")
         self.standardize_Y_with_std = standardize_Y_with_std
-        self.log_Y = log_Y
         self.random_state = random_state
         self.verbose = verbose
         configure_logging(verbose)
@@ -631,10 +739,9 @@ class PolyEmu():
             X_val, Y_val = X_test, Y_test
             cross_val = True
 
-        if self.log_Y:
-            Y_train = np.log(Y_train)
-            if cross_val:
-                Y_val = np.log(Y_val)
+        Y_train = _transform_forward(Y_train, self.transform)
+        if cross_val:
+            Y_val = _transform_forward(Y_val, self.transform)
 
         # Scale the training data
         self.scaler_X = StandardScaler()
@@ -702,7 +809,7 @@ class PolyEmu():
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
                 X_val_unscaled, Y_val_unscaled = _unscale_val(
-                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.log_Y
+                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.transform
                 )
 
                 Y_val_pred = self.forward_emulator(X_val_unscaled)
@@ -773,7 +880,7 @@ class PolyEmu():
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
                 X_val_unscaled, Y_val_unscaled = _unscale_val(
-                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.log_Y
+                    self.scaler_X, self.scaler_Y, X_val, Y_val, self.transform
                 )
 
                 X_val_pred = self.backward_emulator(Y_val_unscaled)
@@ -1270,6 +1377,14 @@ class PolyEmu():
             raise ValueError(msg)
         warnings.warn(msg, ExtrapolationWarning, stacklevel=3)
 
+    def _transforms(self):
+        """Per-output transform tuple; legacy pickles get the log_Y mapping."""
+        t = getattr(self, "transform", None)
+        if t is None:
+            t = tuple("log" if self.log_Y else "linear" for _ in range(self.n_outputs))
+            self.transform = t
+        return t
+
     def forward_emulator(self, X, batch_size=None, extrapolation="warn", return_std=False):
         float_or_int = isinstance(X, (float, int))
         if isinstance(X, list):
@@ -1305,6 +1420,7 @@ class PolyEmu():
                 ],
                 axis=0,
             )
+        transform = self._transforms()
         std = None
         if return_std:
             # Noise-only band: s_j sqrt(1 + h(x)) in physical units. Exact for
@@ -1312,15 +1428,22 @@ class PolyEmu():
             h = np.asarray(self.leverage(X), dtype=float).reshape(-1)
             s = np.asarray(self.forward_resid_std_, dtype=float)
             std = np.sqrt(1.0 + h)[:, None] * s[None, :]
-        if self.log_Y:
-            Y_pred = np.exp(Y_pred)
-            if return_std:
-                # Delta method: dY = Y * d(log Y).
-                std = std * Y_pred
-        elif return_std:
+        if return_std:
+            # Chain rule from the model space (transformed, standardized Y) to
+            # physical units: scale_Y * d(inverse)/dz per column transform.
             _sy = self.scaler_Y.scale_
-            if _sy is not None:
-                std = std * np.asarray(_sy)[None, :]
+            if _sy is None:
+                _sy = np.ones(self.n_outputs)
+            std = std * np.asarray(_sy)[None, :]
+            Y_phys = _transform_inverse(Y_pred, transform)
+            for j, t in enumerate(transform):
+                if t == "log":
+                    std[:, j] = std[:, j] * Y_phys[:, j]
+                elif t == "asinh":
+                    std[:, j] = std[:, j] * np.sqrt(1.0 + Y_phys[:, j] ** 2)
+            Y_pred = Y_phys
+        else:
+            Y_pred = _transform_inverse(Y_pred, transform)
         if float_or_int:
             Y_pred = Y_pred[0]
             if return_std:
@@ -1555,10 +1678,12 @@ class PolyEmu():
         if not hasattr(self, "_inv_scale_Y"):
             _s = self.scaler_Y.scale_
             self._inv_scale_Y = 1.0 / (_s if _s is not None else np.ones(self.n_outputs))
-        if self.log_Y:
-            check_log_domain(Y, "Y")
-            Y = np.log(Y)
         Y = np.asarray(Y, dtype=np.float64)
+        transform = self._transforms()
+        for j, t in enumerate(transform):
+            if t == "log":
+                check_log_domain(Y[:, j:j + 1], f"Y column {j}")
+        Y = _transform_forward(Y, transform)
         if getattr(self, "backward_plan", None) is None:
             self._build_backward_plan()
         Y_scaled = (Y - self.scaler_Y.mean_) * self._inv_scale_Y
@@ -1596,7 +1721,7 @@ class PolyEmu():
             input_vars=self.scaler_X.var_,
             output_means=self.scaler_Y.mean_,
             output_vars=Y_var,
-            log_output=self.log_Y,
+            transform=self._transforms(),
             raw_units=raw_units,
         )
         return exprs
@@ -1615,7 +1740,7 @@ class PolyEmu():
             input_vars=Y_var,
             output_means=self.scaler_X.mean_,
             output_vars=self.scaler_X.var_,
-            log_input=self.log_Y,
+            input_transform=self._transforms(),
             raw_units=raw_units,
         )
         return exprs

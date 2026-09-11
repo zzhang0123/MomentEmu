@@ -44,8 +44,8 @@ class JaxEmulator:
     n_outputs: int
     dmax: int
     level_sizes: tuple
-    log_input: bool
-    log_output: bool
+    input_codes: tuple
+    output_codes: tuple
     direction: str
     dtype: object
 
@@ -75,8 +75,8 @@ class JaxEmulator:
                     f"n_params = {self.n_params}"
                 )
             single = False
-        if self.log_input:
-            X = jnp.log(X)
+        if any(self.input_codes):
+            X = self._apply_forward(X, self.input_codes)
         Xs = (X - self.input_mean) / self.input_scale
         N = Xs.shape[0]
         Dc = self.closure_parent.shape[0]
@@ -91,9 +91,37 @@ class JaxEmulator:
             offset += size
         Phi = buf[self.select].T
         Y = Phi @ self.coeffs
-        if self.log_output:
-            Y = jnp.exp(Y)
+        if any(self.output_codes):
+            Y = self._apply_inverse(Y, self.output_codes)
         return Y[0] if single else Y
+
+    @staticmethod
+    def _apply_forward(X, codes):
+        """Apply the forward per-column transform (1 log, 2 asinh)."""
+        if len(set(codes)) == 1:
+            c = codes[0]
+            return jnp.log(X) if c == 1 else jnp.arcsinh(X) if c == 2 else X
+        cols = [X[:, j] for j in range(X.shape[1])]
+        for j, c in enumerate(codes):
+            if c == 1:
+                cols[j] = jnp.log(cols[j])
+            elif c == 2:
+                cols[j] = jnp.arcsinh(cols[j])
+        return jnp.stack(cols, axis=1)
+
+    @staticmethod
+    def _apply_inverse(Y, codes):
+        """Apply the inverse per-column transform (1 exp, 2 sinh)."""
+        if len(set(codes)) == 1:
+            c = codes[0]
+            return jnp.exp(Y) if c == 1 else jnp.sinh(Y) if c == 2 else Y
+        cols = [Y[:, j] for j in range(Y.shape[1])]
+        for j, c in enumerate(codes):
+            if c == 1:
+                cols[j] = jnp.exp(cols[j])
+            elif c == 2:
+                cols[j] = jnp.sinh(cols[j])
+        return jnp.stack(cols, axis=1)
 
     def __call__(self, X):
         """jax.jit-evaluated prediction (the arrays of self are arguments)."""
@@ -120,6 +148,15 @@ class JaxEmulator:
                 "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
                 "float64; enable x64 or pass dtype=jnp.float32 explicitly."
             )
+        from MomentEmu.PolyEmu import _normalize_transform, _transform_codes
+
+        transform = getattr(emulator, "transform", None)
+        if transform is None:
+            transform = tuple(
+                "log" if emulator.log_Y else "linear" for _ in range(emulator.n_outputs)
+            )
+        codes = _transform_codes(transform)
+        linear = tuple(0 for _ in range(emulator.n_outputs))
         if direction == "forward":
             if not hasattr(emulator, "forward_coeffs"):
                 raise ValueError("the JAX backend needs a forward emulator")
@@ -128,8 +165,8 @@ class JaxEmulator:
             input_mean = emulator.scaler_X.mean_
             input_scale = emulator.scaler_X.scale_
             box = emulator.X_box_
-            log_input = False
-            log_output = bool(emulator.log_Y)
+            input_codes = tuple(0 for _ in range(emulator.n_params))
+            output_codes = codes
             in_dim, out_dim = int(emulator.n_params), int(emulator.n_outputs)
         else:
             if not hasattr(emulator, "backward_coeffs"):
@@ -139,8 +176,8 @@ class JaxEmulator:
             input_mean = emulator.scaler_Y.mean_
             input_scale = output_scale(emulator.scaler_Y, emulator.n_outputs)
             box = emulator.Y_box_
-            log_input = bool(emulator.log_Y)
-            log_output = False
+            input_codes = codes
+            output_codes = linear
             in_dim, out_dim = int(emulator.n_outputs), int(emulator.n_params)
         levels = plan.levels
         level_sizes = tuple(int(a.shape[0]) for a in levels)
@@ -159,8 +196,8 @@ class JaxEmulator:
             n_outputs=out_dim,
             dmax=int(plan.max_degree),
             level_sizes=level_sizes,
-            log_input=log_input,
-            log_output=log_output,
+            input_codes=input_codes,
+            output_codes=output_codes,
             direction=direction,
             dtype=dtype,
         )
@@ -184,8 +221,8 @@ jax.tree_util.register_dataclass(
         "n_outputs",
         "dmax",
         "level_sizes",
-        "log_input",
-        "log_output",
+        "input_codes",
+        "output_codes",
         "direction",
         "dtype",
     ],

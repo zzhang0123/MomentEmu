@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from MomentEmu.PolyEmu import _transform_codes
 from MomentEmu.guards import output_scale
 from MomentEmu.monomials import MonomialPlan
 
@@ -24,6 +25,13 @@ class TorchMomentEmu(nn.Module):
             raise ValueError("the Torch backend needs a forward emulator")
         self.dtype = dtype
         self.log_Y = bool(getattr(trained_emulator, "log_Y", False))
+        transform = getattr(trained_emulator, "transform", None)
+        if transform is None:
+            transform = tuple(
+                "log" if self.log_Y else "linear"
+                for _ in range(trained_emulator.n_outputs)
+            )
+        self.transform_codes = _transform_codes(transform)
         self.n_params = int(trained_emulator.n_params)
         self.n_outputs = int(trained_emulator.n_outputs)
         self.multi_indices = np.asarray(trained_emulator.forward_multi_indices)
@@ -89,9 +97,23 @@ class TorchMomentEmu(nn.Module):
         X_scaled = (X - self.input_mean) / self.input_scale
         Phi = self.evaluate_monomials(X_scaled)
         Y = Phi @ self.coeffs * self.output_scale + self.output_mean
-        if self.log_Y:
-            Y = torch.exp(Y)
+        if any(self.transform_codes):
+            Y = self._apply_inverse(Y)
         return Y
+
+    def _apply_inverse(self, Y: torch.Tensor) -> torch.Tensor:
+        """Inverse per-column transform (1 exp, 2 sinh)."""
+        codes = self.transform_codes
+        if len(set(codes)) == 1:
+            c = codes[0]
+            return torch.exp(Y) if c == 1 else torch.sinh(Y) if c == 2 else Y
+        cols = [Y[:, j] for j in range(Y.shape[1])]
+        for j, c in enumerate(codes):
+            if c == 1:
+                cols[j] = torch.exp(cols[j])
+            elif c == 2:
+                cols[j] = torch.sinh(cols[j])
+        return torch.stack(cols, dim=1)
 
 
 # Backwards-compatible aliases.

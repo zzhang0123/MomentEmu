@@ -45,6 +45,48 @@ def generate_moment_products(Phi, Y, weights=None):
     nu = (Phi.T * w) @ Y / N                    # D x m
     return M, nu
 
+def cholesky_qr2_solve(Phi, Y):
+    """Least-squares solve of Phi c = Y by CholeskyQR2 (P5.4).
+
+    Two Cholesky passes on the Gram matrix give a QR-quality solve at the cost
+    of a normal-equations solve; used when cond(Phi^T Phi) crosses 1e16.
+    """
+    from scipy.linalg import solve_triangular
+
+    Phi = np.asarray(Phi, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    R1 = np.linalg.cholesky(Phi.T @ Phi)  # lower; Phi = Q1 R1^T
+    Q1 = solve_triangular(R1, Phi.T, lower=True, check_finite=False).T
+    R2 = np.linalg.cholesky(Q1.T @ Q1)    # lower; Q1 = Q2 R2^T
+    Q2 = solve_triangular(R2, Q1.T, lower=True, check_finite=False).T
+    a = solve_triangular(R2, Q2.T @ Y, lower=True, trans="T", check_finite=False)
+    return solve_triangular(R1, a, lower=True, trans="T", check_finite=False)
+
+
+def qr_solve(Phi, Y, *, rcond=1e-12):
+    """Householder QR least-squares solve; returns (coeffs, rank) (P5.4).
+
+    Falls back to ``lstsq(rcond)`` and warns with the rank when QR reports a
+    numerical rank below D.
+    """
+    from scipy.linalg import lstsq, solve_triangular
+
+    Phi = np.asarray(Phi, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    Q, R = np.linalg.qr(Phi)
+    diag = np.abs(np.diag(R))
+    rank = int((diag > rcond * diag.max()).sum()) if diag.size else 0
+    if rank == R.shape[0]:
+        return solve_triangular(R, Q.T @ Y, lower=False, check_finite=False), rank
+    warnings.warn(
+        f"QR reports numerical rank {rank} of D = {R.shape[0]}; falling back to "
+        f"lstsq(rcond={rcond}). The fitted coefficients are one member of a family.",
+        IllConditionedWarning,
+        stacklevel=2,
+    )
+    return lstsq(Phi, Y, cond=rcond)[0], rank
+
+
 def solve_emulator_coefficients(
     M,
     nu,
@@ -54,6 +96,8 @@ def solve_emulator_coefficients(
     raise_at: float = COND_RAISE,
     degree: int | None = None,
     return_cond: bool = False,
+    Phi=None,
+    Y=None,
 ):
     """Solve M c = nu for every output with a checked Cholesky factorisation.
 
@@ -94,6 +138,17 @@ def solve_emulator_coefficients(
         n_samples=None,
         method="auto",
     )
+    if rep.level == "singular" and Phi is not None:
+        # P5.4: at cond >= 1e16 refit with CholeskyQR2 (Householder QR if its
+        # Cholesky fails / loses rank); the solve keeps the monomial-z basis.
+        if Y is None:
+            Y = nu
+        try:
+            coeffs = cholesky_qr2_solve(Phi, Y)
+        except np.linalg.LinAlgError:
+            coeffs, _rank = qr_solve(Phi, Y)
+        check_coefficients_finite(coeffs, degree=degree)
+        return (coeffs, rep.cond) if return_cond else coeffs
     from scipy.linalg import cho_factor, cho_solve
 
     try:

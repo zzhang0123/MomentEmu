@@ -1059,6 +1059,7 @@ class PolyEmu:
                     f"or lower the degree."
                 )
 
+            _qr_used = False
             if loo:
                 # Fit on all N and score by exact leave-one-out PRESS from the
                 # same Cholesky factor (P1.5). The metric in RMSE_val_list is
@@ -1089,6 +1090,15 @@ class PolyEmu:
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
                 )
+                if cond >= COND_RAISE:
+                    # P5.4: refit this rung with CholeskyQR2 / Householder QR.
+                    _Phi_qr = MonomialPlan.build(multi_indices).evaluate(X_train_scaled)
+                    _c_qr, _cond_qr = solve_emulator_coefficients(
+                        M, nu, on_singular="warn", degree=d, return_cond=True,
+                        Phi=_Phi_qr, Y=Y_train_scaled,
+                    )
+                    if np.isfinite(_c_qr).all():
+                        coeffs, _qr_used = _c_qr, True
                 if not np.isfinite(coeffs).all():
                     stop_reason = "Cholesky failed"
                     break
@@ -1110,7 +1120,7 @@ class PolyEmu:
             multi_indices_list.append(multi_indices)
             running_time_list.append(time.time() - start_time)
 
-            if cond >= COND_RAISE and (loo or validation_is_training):
+            if cond >= COND_RAISE and not _qr_used and (loo or validation_is_training):
                 stop_reason = "cond(M) >= 1e16"
                 break
             if check_sweep_rmse(RMSE_val_list, degree_list):
@@ -1750,6 +1760,7 @@ class PolyEmu:
                     f"or lower the degree."
                 )
 
+            _qr_used = False
             if loo:
                 _plan = MonomialPlan.build(multi_indices)
                 Phi = _plan.evaluate(Y_train_scaled)
@@ -1777,6 +1788,14 @@ class PolyEmu:
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
                 )
+                if cond >= COND_RAISE:
+                    _Phi_qr = MonomialPlan.build(multi_indices).evaluate(Y_train_scaled)
+                    _c_qr, _cond_qr = solve_emulator_coefficients(
+                        M, nu, on_singular="warn", degree=d, return_cond=True,
+                        Phi=_Phi_qr, Y=X_train_scaled,
+                    )
+                    if np.isfinite(_c_qr).all():
+                        coeffs, _qr_used = _c_qr, True
                 if not np.isfinite(coeffs).all():
                     stop_reason = "Cholesky failed"
                     break
@@ -1798,7 +1817,7 @@ class PolyEmu:
             multi_indices_list.append(multi_indices)
             running_time_list.append(time.time() - start_time)
 
-            if cond >= COND_RAISE and (loo or validation_is_training):
+            if cond >= COND_RAISE and not _qr_used and (loo or validation_is_training):
                 stop_reason = "cond(M) >= 1e16"
                 break
             if check_sweep_rmse(RMSE_val_list, degree_list):

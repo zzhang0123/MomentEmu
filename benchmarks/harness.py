@@ -171,7 +171,7 @@ def accuracy(pred: np.ndarray, ref: np.ndarray) -> dict:
 def emulator_summary(emu: PolyEmu) -> dict:
     mi = emu.forward_multi_indices
     return {
-        "degree": int(getattr(emu, "foward_degree", getattr(emu, "forward_degree", -1))),
+        "degree": int(getattr(emu, "forward_degree", -1)),
         "D_final": int(len(mi)),
         "max_total_degree": int(mi.sum(axis=1).max()),
         "degrees_swept": [int(d) for d in getattr(emu, "forward_degree_list", [])],

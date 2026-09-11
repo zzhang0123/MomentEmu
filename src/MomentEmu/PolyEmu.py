@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from itertools import combinations_with_replacement
 from collections import Counter
 
 import numpy as np
-from logging import warning
 from MomentEmu.guards import (
     COND_RAISE,
     IllConditionedError,
@@ -42,6 +42,18 @@ from MomentEmu.MomentEmu import (
 # backward basis is built from n_outputs, which can be thousands of CMB bins,
 # so a single degree rung can otherwise allocate tens of GB.
 MAX_BACKWARD_MOMENT_BYTES = 1 << 30  # 1 GiB
+
+logger = logging.getLogger("MomentEmu")
+logger.addHandler(logging.NullHandler())
+
+
+def configure_logging(verbose: int = 1) -> None:
+    """Send the sweep progress to stderr at INFO; verbose=0 stays silent."""
+    logger.setLevel(logging.INFO if verbose else logging.WARNING)
+    if verbose and not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
 
 
 ####### Multi-index generation and operations ####
@@ -420,6 +432,21 @@ class PolyEmu():
     forward_frac_err_diag: dict | None = None
     backward_frac_err_diag: dict | None = None
 
+    @property
+    def foward_degree(self):
+        """Deprecated typo alias for forward_degree (removed in 3.0.0)."""
+        warnings.warn(
+            "foward_degree is a typo; use forward_degree (the alias is removed "
+            "in 3.0.0).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.forward_degree
+
+    @foward_degree.setter
+    def foward_degree(self, value):
+        self.forward_degree = value
+
     def __init__(self,
                 X, 
                 Y, 
@@ -442,14 +469,17 @@ class PolyEmu():
                 return_max_frac_err=False,
                 standardize_Y_with_std=True,
                 batch_size=None,
-                random_state=None):
+                random_state=None,
+                verbose=0):
         """
         Polynomial emulator class for both forward and backward emulation.
         X: N x n array of input parameters. N is the number of samples, n is the number of parameters.
         Y: N x m array of observables. m is the number of observables.
         X_test, Y_test: optional test/validation sets. If not provided, a split from X, Y will be used.
         test_size: fraction of data to use for validation if X_test, Y_test not provided.
-        RMSE_tol: target RMSE to stop increasing polynomial degree.
+        RMSE_tol: target validation RMSE, expressed as a fraction of the
+            RMS of the validation Y in the fitting space, so it is
+            scale-free (standardize_Y_with_std does not change its meaning).
         fRMSE_tol: tolerance for selecting best model based on RMSE. We select the simplest model within fRMSE_tol (fractional range) of the lowest RMSE.
 
         forward: whether to generate forward emulator.
@@ -539,6 +569,8 @@ class PolyEmu():
         self.standardize_Y_with_std = standardize_Y_with_std
         self.log_Y = log_Y
         self.random_state = random_state
+        self.verbose = verbose
+        configure_logging(verbose)
 
         if batch_size is None:
             batch_size = X.shape[0]
@@ -587,7 +619,7 @@ class PolyEmu():
 
 
         if forward:
-            print("\n Generating forward emulator...")
+            logger.info("Generating forward emulator ...")
 
             # Largest degree whose basis is identifiable with a 2x oversampling
             # margin (D3): basis_size(n, d) <= N_train / 2. The old max_order
@@ -640,7 +672,7 @@ class PolyEmu():
                 self.forward_max_frac_err = _public_max_frac_err(diag)
 
         if backward:
-            print("Generating backward emulator...")
+            logger.info("Generating backward emulator ...")
             # The backward basis is built from n_outputs, so the same D cap and a
             # memory budget apply here (n = m).
             max_deg_backward = max_supported_degree(self.n_outputs, X_train.shape[0])
@@ -763,6 +795,11 @@ class PolyEmu():
                 stacklevel=2,
             )
         stop_reason = "reached max_degree"
+        # Scale-free RMSE_tol (P1.4): compare against the RMS of the
+        # validation Y in the same space, so rescaling the data with
+        # with_std=False does not change the selected degree.
+        _y_rms = float(np.sqrt(np.mean(np.asarray(Y_val_scaled) ** 2)))
+        rmse_ref = _y_rms if _y_rms > 0 else 1.0
 
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
@@ -846,7 +883,7 @@ class PolyEmu():
             if check_sweep_rmse(RMSE_val_list, degree_list):
                 stop_reason = "validation RMSE blow-up"
                 break
-            if (not validation_is_training) and RMSE_val < RMSE_tol:
+            if (not validation_is_training) and RMSE_val < RMSE_tol * rmse_ref:
                 stop_reason = "RMSE_tol met"
                 break
 
@@ -867,8 +904,14 @@ class PolyEmu():
             ind = int(np.argmin(masked))
         coeffs = coeffs_list[ind]
         multi_indices = multi_indices_list[ind]
-        self.foward_degree = degree_list[ind]
+        self.forward_degree = degree_list[ind]
         self.forward_cond_est_ = cond_list[ind]
+        _sel_pred = evaluate_emulator_batched(
+            X_val_scaled, coeffs, multi_indices, batch_size=batch_size
+        )
+        self.forward_RMSE_per_output_ = np.sqrt(
+            np.mean((_sel_pred - Y_val_scaled) ** 2, axis=0)
+        )
 
         self.forward_coeffs = coeffs
         self.forward_multi_indices = multi_indices
@@ -1002,6 +1045,8 @@ class PolyEmu():
                 stacklevel=2,
             )
         stop_reason = "reached max_degree"
+        _x_rms = float(np.sqrt(np.mean(np.asarray(X_val_scaled) ** 2)))
+        rmse_ref = _x_rms if _x_rms > 0 else 1.0
 
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
@@ -1081,7 +1126,7 @@ class PolyEmu():
             if check_sweep_rmse(RMSE_val_list, degree_list):
                 stop_reason = "validation RMSE blow-up"
                 break
-            if (not validation_is_training) and RMSE_val < RMSE_tol:
+            if (not validation_is_training) and RMSE_val < RMSE_tol * rmse_ref:
                 stop_reason = "RMSE_tol met"
                 break
 
@@ -1102,6 +1147,12 @@ class PolyEmu():
         multi_indices = multi_indices_list[ind]
         self.backward_degree = degree_list[ind]
         self.backward_cond_est_ = cond_list[ind]
+        _sel_pred = evaluate_emulator_batched(
+            Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
+        )
+        self.backward_RMSE_per_output_ = np.sqrt(
+            np.mean((_sel_pred - X_val_scaled) ** 2, axis=0)
+        )
 
         self.backward_coeffs = coeffs
         self.backward_multi_indices = multi_indices

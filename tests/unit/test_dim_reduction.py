@@ -50,7 +50,7 @@ def test_forward_RMSE_describes_stored_model():
     pred = evaluate_monomials_lazy(Xs, emu.forward_multi_indices) @ emu.forward_coeffs
     rmse = float(np.sqrt(np.mean((pred - Ys) ** 2)))
     assert emu.forward_RMSE == pytest.approx(rmse, rel=1e-12, abs=1e-15)
-    sel = emu.forward_degree_list.index(emu.foward_degree)
+    sel = emu.forward_degree_list.index(emu.forward_degree)
     assert emu.forward_RMSE == pytest.approx(emu.forward_RMSE_list[sel])
 
 

@@ -56,7 +56,7 @@ def _fit():
 
 def test_selected_degree_and_basis_exact():
     emu, _, _ = _fit()
-    assert emu.foward_degree == PIN["degree"]
+    assert emu.forward_degree == PIN["degree"]
     assert emu.forward_multi_indices.shape[0] == PIN["D"]
 
 

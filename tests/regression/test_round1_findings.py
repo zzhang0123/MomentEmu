@@ -241,7 +241,7 @@ def test_wrapper_1d_batch_silently_wrong(emu):
 # ---------------------------------------------------------------------------
 # Medium / low findings
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(strict=True, reason="P4.1 fit/predict split")
+
 def test_constructor_does_all_work():
     assert hasattr(PolyEmu, "fit") and hasattr(PolyEmu, "predict")
 

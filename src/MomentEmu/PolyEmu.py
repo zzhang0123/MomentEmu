@@ -391,7 +391,8 @@ class PolyEmu():
                 per_mode_thres=None,
                 return_max_frac_err=False,
                 standardize_Y_with_std=True,
-                batch_size=None):
+                batch_size=None,
+                random_state=None):
         """
         Polynomial emulator class for both forward and backward emulation.
         X: N x n array of input parameters. N is the number of samples, n is the number of parameters.
@@ -414,6 +415,8 @@ class PolyEmu():
             when this is enabled.
         standardize_Y_with_std: whether to standardize Y with standard deviation (True) or only mean (False).
         batch_size: batch size for batched computations to manage memory usage.
+        random_state: seed passed to the internal train/validation split when
+            X_test/Y_test are omitted. Stored as self.random_state.
 
         Validation diagnostics
         ----------------------
@@ -446,14 +449,26 @@ class PolyEmu():
         self.n_outputs = Y.shape[1]
         self.standardize_Y_with_std = standardize_Y_with_std
         self.log_Y = log_Y
+        self.random_state = random_state
 
         if batch_size is None:
             batch_size = X.shape[0]
 
+        # A lone X_test or Y_test is silently ignored by the version below;
+        # reject it so the caller knows the argument did nothing.
+        if (X_test is None) != (Y_test is None):
+            raise ValueError(
+                "X_test and Y_test must both be given or both omitted (got X_test="
+                f"{'None' if X_test is None else 'given'}, Y_test="
+                f"{'None' if Y_test is None else 'given'})"
+            )
+
         if X_test is None or Y_test is None:
             if cross_validation:
                 # Split into training and validation
-                X_train, X_val, Y_train, Y_val = train_test_split(X, Y, test_size=test_size)
+                X_train, X_val, Y_train, Y_val = train_test_split(
+                    X, Y, test_size=test_size, random_state=random_state
+                )
                 cross_val = True
             else:
                 X_train, Y_train = X, Y

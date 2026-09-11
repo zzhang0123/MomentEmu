@@ -92,16 +92,16 @@ def test_forward_fast_matches_lazy(log_Y, with_std):
     rng = np.random.default_rng(3)
     X = _test_points(emu, rng)
     ref = _ref_forward(emu, X)
-    got = emu.forward_emulator(X)
+    got = emu.forward_emulator(X, extrapolation="ignore")
     assert _column_scale_rel(got, ref) < 1e-13
 
 
 def test_integer_and_float32_inputs_give_float64():
     emu = _fit(4)
     X = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.int64)
-    out_i = emu.forward_emulator(X)
+    out_i = emu.forward_emulator(X, extrapolation="ignore")
     assert out_i.dtype == np.float64
-    out_f = emu.forward_emulator(X.astype(np.float32))
+    out_f = emu.forward_emulator(X.astype(np.float32), extrapolation="ignore")
     assert out_f.dtype == np.float64
     np.testing.assert_allclose(out_i, out_f, rtol=1e-12)
 
@@ -109,5 +109,5 @@ def test_integer_and_float32_inputs_give_float64():
 def test_fitted_coefficients_unchanged_by_fast_path():
     emu = _fit(5)
     before = emu.forward_coeffs.copy()
-    emu.forward_emulator(np.array([[0.1, -0.2, 0.3]]))
+    emu.forward_emulator(np.array([[0.1, -0.2, 0.3]]), extrapolation="ignore")
     assert np.array_equal(before, emu.forward_coeffs)

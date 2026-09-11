@@ -251,7 +251,7 @@ def test_emulator_accuracy():
     ])
     
     # Get emulator predictions
-    emulator_predictions = emulator.forward_emulator(test_points)
+    emulator_predictions = emulator.forward_emulator(test_points, extrapolation="ignore")
     
     # Calculate true values
     true_values = (test_points[:, 0]**2 + test_points[:, 1]**2).reshape(-1, 1)

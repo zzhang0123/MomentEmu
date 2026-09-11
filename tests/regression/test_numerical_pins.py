@@ -62,7 +62,7 @@ def test_selected_degree_and_basis_exact():
 
 def test_test_rmse_pin():
     emu, Xt, Yt = _fit()
-    rmse = float(np.sqrt(np.mean((emu.forward_emulator(Xt) - Yt) ** 2)))
+    rmse = float(np.sqrt(np.mean((emu.forward_emulator(Xt, extrapolation="ignore") - Yt) ** 2)))
     assert rmse == pytest.approx(PIN["rmse"], rel=RMSE_RTOL)
 
 

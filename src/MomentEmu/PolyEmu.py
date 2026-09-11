@@ -8,6 +8,8 @@ from collections import Counter
 import numpy as np
 from MomentEmu.guards import (
     COND_RAISE,
+    DomainBox,
+    ExtrapolationWarning,
     IllConditionedError,
     InsufficientSamplesError,
     as_float64,
@@ -17,12 +19,15 @@ from MomentEmu.guards import (
     check_design_columns,
     check_distinct_rows,
     check_finite,
+    check_in_domain,
     check_log_domain,
     check_sample_count,
     check_sweep_rmse,
     check_test_pair,
     check_xy_shapes,
     count_distinct_rows,
+    extrapolation_distance,
+    fit_domain_box,
     max_supported_degree,
     resolve_batch_shape,
 )
@@ -573,6 +578,9 @@ class PolyEmu():
         configure_logging(verbose)
         self.loo_rmse_ = None
         self.leverage_max_train_ = None
+        # Training box (P1.6): raw min/max/std per parameter and per output.
+        self.X_box_ = fit_domain_box(X)
+        self.Y_box_ = fit_domain_box(Y)
 
         # D14: cross_validation is deprecated. Without an explicit X_test the
         # degree is selected by exact leave-one-out PRESS on all N (P1.5); with
@@ -959,6 +967,14 @@ class PolyEmu():
         self.forward_RMSE = float(RMSE_val_list[ind])
         self.forward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.forward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
+        # Cholesky factor of the selected moment matrix, kept for leverage().
+        from scipy.linalg import cho_factor
+
+        _final_plan = MonomialPlan.build(multi_indices)
+        _Phi = _final_plan.evaluate(X_train_scaled)
+        _M = _Phi.T @ _Phi / X_train_scaled.shape[0]
+        self.forward_chol_ = cho_factor(_M, lower=False, check_finite=False)
+        self.forward_N_train_ = int(X_train_scaled.shape[0])
         self._build_forward_plan()
 
     def _build_forward_plan(self):
@@ -983,7 +999,67 @@ class PolyEmu():
             self.backward_coeffs, mi, self.scaler_X.mean_, scale_X
         )
 
-    def forward_emulator(self, X, batch_size=None):
+    def in_domain(self, X):
+        """True when each row of X lies inside the stored training box (P1.6).
+
+        A 1-D input of length n_params returns a single bool; an (N, n_params)
+        input returns an (N,) bool array. No warning is raised here.
+        """
+        arr = np.asarray(X, dtype=np.float64)
+        single = arr.ndim == 1
+        arr = np.atleast_2d(arr)
+        inside = np.all((arr >= self.X_box_.lo) & (arr <= self.X_box_.hi), axis=1)
+        return bool(inside[0]) if single else inside
+
+    def leverage(self, X):
+        """Leverage h(x) = ||L^{-1} phi(x)||^2 / N of the stored forward model.
+
+        L is the Cholesky factor of the training moment matrix on the selected
+        basis, so h(x) is the diagonal of the hat matrix at arbitrary x. The
+        training rows have sum(h) = D.
+        """
+        from scipy.linalg import solve_triangular
+
+        arr = np.asarray(X, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        Xs = (arr - self.scaler_X.mean_) * self._inv_scale_X
+        Phi = self.forward_plan.evaluate(Xs)
+        cf, lower = self.forward_chol_
+        A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
+        h = np.einsum("ij,ij->j", A, A) / self.forward_N_train_
+        return float(h[0]) if h.size == 1 else h
+
+    def _check_box(self, X, box: DomainBox, extrapolation: str, label: str) -> None:
+        if extrapolation not in ("warn", "raise", "ignore"):
+            raise ValueError(
+                f"extrapolation must be 'warn', 'raise' or 'ignore', got "
+                f"{extrapolation!r}"
+            )
+        if extrapolation == "ignore":
+            return
+        X2 = np.atleast_2d(np.asarray(X, dtype=np.float64))
+        dist = extrapolation_distance(X2, box)
+        out = dist > 0
+        if not out.any():
+            return
+        rng = box.hi - box.lo
+        parts = []
+        for j in np.where(out.any(axis=0))[0]:
+            excess = float(
+                (np.maximum(box.lo[j] - X2[:, j], 0.0) + np.maximum(X2[:, j] - box.hi[j], 0.0)).max()
+            )
+            pct = 100.0 * excess / rng[j] if rng[j] > 0 else float("inf")
+            parts.append(
+                f"parameter {j}: {int(out[:, j].sum())} of {X2.shape[0]} row(s) outside "
+                f"[{box.lo[j]:.6g}, {box.hi[j]:.6g}], farthest {pct:.1f}% of the range beyond"
+            )
+        msg = f"{label} lies outside the training box; " + "; ".join(parts)
+        if extrapolation == "raise":
+            raise ValueError(msg)
+        warnings.warn(msg, ExtrapolationWarning, stacklevel=3)
+
+    def forward_emulator(self, X, batch_size=None, extrapolation="warn"):
         float_or_int = isinstance(X, (float, int))
         if isinstance(X, list):
             X = np.array(X)
@@ -998,6 +1074,7 @@ class PolyEmu():
         X, _single = resolve_batch_shape(X, self.n_params)
         # D1: predict in float64 even when the caller passes int/float32.
         X = np.asarray(X, dtype=np.float64)
+        self._check_box(X, self.X_box_, extrapolation, "input")
         if getattr(self, "forward_plan", None) is None:
             self._build_forward_plan()
         X_scaled = (X - self.scaler_X.mean_) * self._inv_scale_X
@@ -1218,9 +1295,16 @@ class PolyEmu():
         self.backward_RMSE = float(RMSE_val_list[ind])
         self.backward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.backward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
+        from scipy.linalg import cho_factor
+
+        _final_plan = MonomialPlan.build(multi_indices)
+        _Phi = _final_plan.evaluate(Y_train_scaled)
+        _M = _Phi.T @ _Phi / Y_train_scaled.shape[0]
+        self.backward_chol_ = cho_factor(_M, lower=False, check_finite=False)
+        self.backward_N_train_ = int(Y_train_scaled.shape[0])
         self._build_backward_plan()
 
-    def backward_emulator(self, Y, batch_size=None):
+    def backward_emulator(self, Y, batch_size=None, extrapolation="warn"):
         float_or_int = isinstance(Y, (float, int))
         if isinstance(Y, list):
             Y = np.array(Y)
@@ -1231,6 +1315,7 @@ class PolyEmu():
         check_finite(Y, "Y")
         Yshape = Y.shape
         Y, _single = resolve_batch_shape(Y, self.n_outputs)
+        self._check_box(Y, self.Y_box_, extrapolation, "output")
         if self.log_Y:
             check_log_domain(Y, "Y")
             Y = np.log(Y)

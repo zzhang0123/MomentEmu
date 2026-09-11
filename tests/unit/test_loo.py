@@ -104,9 +104,9 @@ def test_loo_beats_split_seed_averaged(N):
             Yf = _target(Xf)
             scale = float(np.sqrt(np.mean(Yf ** 2)))
             loo_rmses.append(
-                float(np.sqrt(np.mean((loo.forward_emulator(Xf) - Yf) ** 2))) / scale
+                float(np.sqrt(np.mean((loo.forward_emulator(Xf, extrapolation="ignore") - Yf) ** 2))) / scale
             )
             split_rmses.append(
-                float(np.sqrt(np.mean((split.forward_emulator(Xf) - Yf) ** 2))) / scale
+                float(np.sqrt(np.mean((split.forward_emulator(Xf, extrapolation="ignore") - Yf) ** 2))) / scale
             )
         assert np.mean(loo_rmses) <= np.mean(split_rmses)

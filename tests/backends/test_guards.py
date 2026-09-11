@@ -72,7 +72,7 @@ def test_jax_matches_forward_emulator_no_std(no_std_emu):
     X = rng.uniform(-1.0, 1.0, (200, 3))
     f = create_jax_emulator(no_std_emu)
     got = np.asarray(f(jnp.asarray(X)))
-    ref = no_std_emu.forward_emulator(X)
+    ref = no_std_emu.forward_emulator(X, extrapolation="ignore")
     assert _col_rel(got, ref) < 1e-12
 
 
@@ -83,7 +83,7 @@ def test_torch_matches_forward_emulator_no_std(no_std_emu):
     tm = TorchMomentEmu(no_std_emu)
     with torch.no_grad():
         got = tm(torch.as_tensor(X, dtype=torch.float64)).numpy()
-    ref = no_std_emu.forward_emulator(X)
+    ref = no_std_emu.forward_emulator(X, extrapolation="ignore")
     assert _col_rel(got, ref) < 1e-6
 
 

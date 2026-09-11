@@ -69,4 +69,4 @@ def test_rosenbrock_default_is_exact():
     t = TARGETS["rosenbrock"]
     X, Y, Xt, Yt = t.data()
     emu = PolyEmu(X, Y, X_test=Xt, Y_test=Yt, **fixed_degree_kwargs(4))
-    assert accuracy(emu.forward_emulator(Xt), Yt)["nrmse"] < 1e-12
+    assert accuracy(emu.forward_emulator(Xt, extrapolation="ignore"), Yt)["nrmse"] < 1e-12

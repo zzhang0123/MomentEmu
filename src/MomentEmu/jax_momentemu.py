@@ -218,6 +218,52 @@ def evaluate_monomials_jax_static(X_scaled, multi_indices):
     return jnp.stack(columns, axis=1)
 
 
+def log_prior_box(x, box_lo, box_hi):
+    """0 inside the closed box, -inf outside (a numpyro-compatible indicator).
+
+    Use it as a numpyro factor or add it to a log-density so a sampler never
+    wanders into the region where the polynomial is unconstrained.
+    """
+    x = jnp.asarray(x)
+    inside = jnp.all((x >= box_lo) & (x <= box_hi))
+    return jnp.where(inside, 0.0, -jnp.inf)
+
+
+def make_guarded_logdensity(emulator, logprior, *, penalty=1e10):
+    """Guarded log-density: clip into the box, finite penalty outside (P2.5a).
+
+    The polynomial is always evaluated at ``clip(x, box_lo, box_hi)``, so it
+    never sees an out-of-box point (the review measured evaluations up to 1e24
+    half-widths out and values 1e191 times the truth under a wide prior).
+    ``jnp.clip`` has zero derivative in the clipped region and the penalty is a
+    constant branch, so the log-density has a finite value and exactly zero
+    gradient outside the box. The numpyro prior should be the training box or
+    narrower.
+
+    Parameters
+    ----------
+    emulator : JaxEmulator
+        Typically an un-jitted forward emulator; call it through the returned
+        function inside a user jit.
+    logprior : callable
+        Prior log-density of x (may be constant).
+    penalty : float
+        Finite penalty subtracted outside the box.
+    """
+    lo = emulator.box_lo
+    hi = emulator.box_hi
+
+    def logpost(x):
+        x = jnp.asarray(x, dtype=emulator.dtype)
+        x_clipped = jnp.clip(x, lo, hi)
+        y = emulator.evaluate(x_clipped)
+        loglike = -0.5 * jnp.sum(y ** 2)
+        outside = jnp.any((x < lo) | (x > hi))
+        return logprior(x) + loglike + jnp.where(outside, -penalty, 0.0)
+
+    return logpost
+
+
 def demo_jax_autodiff():
     """Demonstrate the JAX backend on a small quadratic emulator."""
     from MomentEmu.PolyEmu import PolyEmu

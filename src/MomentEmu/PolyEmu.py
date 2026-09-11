@@ -998,6 +998,11 @@ class PolyEmu():
         _M = _Phi.T @ _Phi / X_train_scaled.shape[0]
         self.forward_chol_ = cho_factor(_M, lower=False, check_finite=False)
         self.forward_N_train_ = int(X_train_scaled.shape[0])
+        # Per-output residual standard deviation in the fitted (standardized Y)
+        # space, used by the noise-only predictive band (P3.5).
+        _resid = Y_train_scaled - _Phi @ coeffs
+        _dof = max(self.forward_N_train_ - multi_indices.shape[0], 1)
+        self.forward_resid_std_ = np.sqrt(np.sum(_resid ** 2, axis=0) / _dof)
         self._build_forward_plan()
 
     def _build_forward_plan(self):
@@ -1054,6 +1059,10 @@ class PolyEmu():
         A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
         h = np.einsum("ij,ij->j", A, A) / self.forward_N_train_
         return float(h[0]) if h.size == 1 else h
+
+    def hat_diagonal(self, X):
+        """Alias for :meth:`leverage`: the hat-matrix diagonal at X (P3.5)."""
+        return self.leverage(X)
 
     def jacobian(self, X, batch_size=None):
         """Analytic dY/dX of the forward emulator (P2.2).
@@ -1261,7 +1270,7 @@ class PolyEmu():
             raise ValueError(msg)
         warnings.warn(msg, ExtrapolationWarning, stacklevel=3)
 
-    def forward_emulator(self, X, batch_size=None, extrapolation="warn"):
+    def forward_emulator(self, X, batch_size=None, extrapolation="warn", return_std=False):
         float_or_int = isinstance(X, (float, int))
         if isinstance(X, list):
             X = np.array(X)
@@ -1296,15 +1305,35 @@ class PolyEmu():
                 ],
                 axis=0,
             )
+        std = None
+        if return_std:
+            # Noise-only band: s_j sqrt(1 + h(x)) in physical units. Exact for
+            # iid noise; it undercovers model error (P3.5).
+            h = np.asarray(self.leverage(X), dtype=float).reshape(-1)
+            s = np.asarray(self.forward_resid_std_, dtype=float)
+            std = np.sqrt(1.0 + h)[:, None] * s[None, :]
         if self.log_Y:
             Y_pred = np.exp(Y_pred)
+            if return_std:
+                # Delta method: dY = Y * d(log Y).
+                std = std * Y_pred
+        elif return_std:
+            _sy = self.scaler_Y.scale_
+            if _sy is not None:
+                std = std * np.asarray(_sy)[None, :]
         if float_or_int:
             Y_pred = Y_pred[0]
+            if return_std:
+                std = std[0]
             if self.n_outputs == 1:
                 Y_pred = Y_pred[0]
+                if return_std:
+                    std = std[0]
         else:
             Y_pred = Y_pred.reshape(Xshape[:-1] + (self.n_outputs,))
-        return Y_pred
+            if return_std:
+                std = std.reshape(Xshape[:-1] + (self.n_outputs,))
+        return (Y_pred, std) if return_std else Y_pred
 
     def generate_backward_emulator(self, 
                                    X_train_scaled, 

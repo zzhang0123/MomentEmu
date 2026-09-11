@@ -167,3 +167,38 @@ def test_per_output_false_reduces_to_global_strategy() -> None:
     assert diag["strategy"] == "signal_mask"
     assert isinstance(diag["floor"], float)
     assert isinstance(diag["dr_decades"], float)
+
+def test_fully_masked_output_column_reported() -> None:
+    ref = np.array([[1.0, 1e-30], [2.0, 2e-30]])
+    pred = ref.copy()
+    with pytest.warns(UserWarning, match="output column"):
+        diag = signal_aware_frac_err(pred, ref, absolute_floor=1e-15)
+    assert diag["fully_masked_outputs"].tolist() == [1]
+    assert diag["n_above_per_output"].tolist() == [2, 0]
+
+
+def test_nan_in_pred_gives_inf_public_metric() -> None:
+    from MomentEmu.PolyEmu import _public_max_frac_err
+
+    ref = np.array([[1.0], [2.0]])
+    pred = np.array([[1.0], [np.nan]])
+    diag = signal_aware_frac_err(pred, ref)
+    assert not np.isfinite(diag["max_rel"])
+    assert _public_max_frac_err(diag) == float("inf")
+
+
+@pytest.mark.parametrize("factor,expected_above", [(0.3, 0), (1.0, 1), (3.0, 1)])
+def test_mask_boundary_at_floor_multiplier(factor, expected_above) -> None:
+    floor = 1e-12
+    ref = np.array([[floor * factor]])
+    pred = ref.copy()
+    if factor < 1:
+        with pytest.warns(UserWarning, match="output column"):
+            diag = signal_aware_frac_err(
+                pred, ref, signal_floor_frac=1e-30, absolute_floor=floor
+            )
+    else:
+        diag = signal_aware_frac_err(
+            pred, ref, signal_floor_frac=1e-30, absolute_floor=floor
+        )
+    assert diag["n_above"] == expected_above

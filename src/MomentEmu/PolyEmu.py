@@ -331,6 +331,21 @@ def _unscale_val(scaler_X, scaler_Y, X_val_scaled, Y_val_scaled, log_Y):
     return X, Y
 
 
+def _public_max_frac_err(diag):
+    """Public forward/backward_max_frac_err from a signal_aware_frac_err dict.
+
+    Returns inf when the mask is empty, any output column is fully masked,
+    or max_rel is not finite, so a threshold check fails loudly.
+    """
+    if diag["n_above"] == 0:
+        return float("inf")
+    if len(diag.get("fully_masked_outputs", ())) > 0:
+        return float("inf")
+    if not np.isfinite(diag["max_rel"]):
+        return float("inf")
+    return float(diag["max_rel"])
+
+
 def _report_frac_err(
     label,
     pred,
@@ -619,13 +634,10 @@ class PolyEmu():
                 Y_val_pred = self.forward_emulator(X_val_unscaled)
                 diag = _report_frac_err("Forward", Y_val_pred, Y_val_unscaled)
                 self.forward_frac_err_diag = diag
-                # Coerce nan -> inf on the public attribute so downstream
-                # threshold comparisons (`emu.forward_max_frac_err > tol`) fail
-                # loudly when the signal mask is empty. The diag dict still
-                # carries the spec-compliant nan for n_above == 0.
-                self.forward_max_frac_err = (
-                    diag["max_rel"] if diag["n_above"] > 0 else float("inf")
-                )
+                # Coerce nan -> inf on the public attribute so threshold
+                # comparisons fail loudly when the signal mask is empty, any
+                # output column is fully masked, or max_rel is not finite.
+                self.forward_max_frac_err = _public_max_frac_err(diag)
 
         if backward:
             print("Generating backward emulator...")
@@ -692,11 +704,7 @@ class PolyEmu():
                 X_val_pred = self.backward_emulator(Y_val_unscaled)
                 diag = _report_frac_err("Backward", X_val_pred, X_val_unscaled)
                 self.backward_frac_err_diag = diag
-                # See forward branch: coerce nan -> inf so threshold checks
-                # fail loudly when the signal mask is empty.
-                self.backward_max_frac_err = (
-                    diag["max_rel"] if diag["n_above"] > 0 else float("inf")
-                )
+                self.backward_max_frac_err = _public_max_frac_err(diag)
 
     def generate_forward_emulator(self, 
                                   X_train_scaled, 

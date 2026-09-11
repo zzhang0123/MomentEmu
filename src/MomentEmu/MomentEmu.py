@@ -391,6 +391,11 @@ def signal_aware_frac_err(
     deep-tail entries are floating-point noise (e.g. ``1e-7`` to
     ``1e-24`` spans), the default is appropriate.
 
+    This is a shape diagnostic, not an accuracy verdict: it does not
+    determine posterior accuracy (use :meth:`PolyEmu.validate` with the
+    data covariance), and a small ``max_rel`` can coexist with a large
+    posterior shift.
+
     A useful calibration heuristic: pick ``signal_floor_frac`` so the
     masked-out entries' aggregate contribution to any user-facing
     observable is ≤ the rtol gate. For an rtol of ``1e-7`` on an
@@ -490,11 +495,31 @@ def signal_aware_frac_err(
     n_total = int(ref.size)
     n_above = int(mask.sum())
 
+    # Per-output mask counts (P1.3). A column with no in-mask entry is
+    # reported separately: the old code let it drop out silently and reported
+    # a finite max_rel for the rest, so a dead output looked healthy.
+    if use_per_output:
+        n_above_per_output = np.asarray(mask.sum(axis=0)).astype(int)
+        fully_masked_outputs = np.flatnonzero(n_above_per_output == 0)
+    else:
+        n_above_per_output = int(n_above)
+        fully_masked_outputs = np.array([0], dtype=int) if n_above == 0 else np.array([], dtype=int)
+    if fully_masked_outputs.size:
+        warnings.warn(
+            f"signal_aware_frac_err: output column(s) {fully_masked_outputs.tolist()} "
+            f"lie entirely below the floor {floor_out!r}; their fractional error is "
+            f"undefined and they are excluded from max_rel and rmse.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     if n_above == 0:
         return {
             "max_rel": float("nan"),
             "rmse": float("nan"),
             "n_above": 0,
+            "n_above_per_output": n_above_per_output,
+            "fully_masked_outputs": fully_masked_outputs,
             "n_total": n_total,
             "floor": floor_out,
             "dr_decades": dr_out,
@@ -524,6 +549,8 @@ def signal_aware_frac_err(
         "max_rel": max_rel,
         "rmse": rmse,
         "n_above": n_above,
+        "n_above_per_output": n_above_per_output,
+        "fully_masked_outputs": fully_masked_outputs,
         "n_total": n_total,
         "floor": floor_out,
         "dr_decades": dr_out,

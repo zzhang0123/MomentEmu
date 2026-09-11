@@ -58,3 +58,14 @@ markers = [
     "slow: takes more than ~5 s; deselect with -m 'not slow'",
     "backend(name): requires the optional jax/torch extra",
 ]
+[tool.coverage.run]
+source = ["MomentEmu"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "def demo_.*:",
+]

@@ -39,3 +39,6 @@ signal_mask.md
 .Trashes
 ehthumbs.db
 Thumbs.db
+# Coverage data
+.coverage
+coverage.xml

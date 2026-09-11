@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-import numpy as np
+import warnings
 from itertools import combinations_with_replacement
 from collections import Counter
+
+import numpy as np
 import sympy as sp
 from logging import warning
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
+from MomentEmu.guards import (
+    basis_size,
+    check_degree_range,
+    max_supported_degree,
+)
 from MomentEmu.MomentEmu import (
     generate_moment_products,
     solve_emulator_coefficients,
@@ -17,6 +24,10 @@ from MomentEmu.MomentEmu import (
     signal_aware_frac_err,
 )
 
+# Memory budget for a backward-sweep moment matrix M (D x D float64). The
+# backward basis is built from n_outputs, which can be thousands of CMB bins,
+# so a single degree rung can otherwise allocate tens of GB.
+MAX_BACKWARD_MOMENT_BYTES = 1 << 30  # 1 GiB
 
 
 ####### Multi-index generation and operations ####
@@ -277,11 +288,19 @@ def evaluate_emulator_batched(X, coeffs, multi_indices, batch_size=10000):
     return Y_pred
 
 def max_order(n_params, N_samples):
-    import math
-    k = 0
-    while math.comb(n_params+k,k) < N_samples:
-        k += 1
-    return k
+    """Deprecated: the old off-by-one degree helper.
+
+    It returned the SMALLEST k with C(n+k, k) >= N, a degree whose basis is
+    rank-deficient. Use :func:`MomentEmu.guards.max_supported_degree`, which
+    returns the LARGEST identifiable degree (D < N).
+    """
+    warnings.warn(
+        "max_order is deprecated and returned a degree with D >= N; use "
+        "guards.max_supported_degree(n_params, N_samples, fill=1) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return max_supported_degree(n_params, N_samples, fill=1.0)
 
 
 def _unscale_val(scaler_X, scaler_Y, X_val_scaled, Y_val_scaled, log_Y):
@@ -502,11 +521,27 @@ class PolyEmu():
         if forward:
             print("\n Generating forward emulator...")
 
-            max_deg_forward = max_order(self.n_params, X_train.shape[0])
-
-            if max_degree_forward is None or max_degree_forward > max_deg_forward:
+            # Largest degree whose basis is identifiable with a 2x oversampling
+            # margin (D3): basis_size(n, d) <= N_train / 2. The old max_order
+            # returned the smallest degree with D >= N.
+            max_deg_forward = max_supported_degree(self.n_params, X_train.shape[0])
+            if max_degree_forward is None:
                 max_degree_forward = max_deg_forward
-                print(f"Set max_degree_forward to {max_degree_forward}. Otherwise, a higher degree will require more samples.")
+                warnings.warn(
+                    f"auto-capped max_degree_forward at {max_degree_forward} for n_params = "
+                    f"{self.n_params}, N_train = {X_train.shape[0]} and fill factor 2 "
+                    f"(basis_size <= N_train / 2); a higher degree needs more samples.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            elif max_degree_forward > max_deg_forward:
+                D = basis_size(self.n_params, max_degree_forward)
+                if D >= X_train.shape[0]:
+                    raise ValueError(
+                        f"max_degree_forward = {max_degree_forward} needs a basis of D = {D} "
+                        f"terms but N_train = {X_train.shape[0]}; the largest admissible degree "
+                        f"is {max_deg_forward}. Add distinct samples or lower the degree."
+                    )
 
             self.generate_forward_emulator(
                 X_train, 
@@ -541,11 +576,47 @@ class PolyEmu():
 
         if backward:
             print("Generating backward emulator...")
-            max_deg_backward = max_order(self.n_outputs, X_train.shape[0])
-
-            if max_degree_backward is None or max_degree_backward > max_deg_backward:
+            # The backward basis is built from n_outputs, so the same D cap and a
+            # memory budget apply here (n = m).
+            max_deg_backward = max_supported_degree(self.n_outputs, X_train.shape[0])
+            if max_degree_backward is None:
                 max_degree_backward = max_deg_backward
-                print(f"Set max_degree_backward to {max_degree_backward}. Otherwise, a higher degree will require more samples.")
+                warnings.warn(
+                    f"auto-capped max_degree_backward at {max_degree_backward} for n_outputs = "
+                    f"{self.n_outputs}, N_train = {X_train.shape[0]} and fill factor 2 "
+                    f"(basis_size <= N_train / 2); a higher degree needs more samples.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            elif max_degree_backward > max_deg_backward:
+                D = basis_size(self.n_outputs, max_degree_backward)
+                if D >= X_train.shape[0]:
+                    raise ValueError(
+                        f"max_degree_backward = {max_degree_backward} needs a basis of D = {D} "
+                        f"terms but N_train = {X_train.shape[0]}; the largest admissible degree "
+                        f"is {max_deg_backward}. Add distinct samples or lower the degree."
+                    )
+
+            if max_degree_backward > 0:
+                D_back = basis_size(self.n_outputs, max_degree_backward)
+                reduced_from = max_degree_backward
+                while max_degree_backward > 0 and D_back * D_back * 8 > MAX_BACKWARD_MOMENT_BYTES:
+                    max_degree_backward -= 1
+                    D_back = basis_size(self.n_outputs, max_degree_backward)
+                if max_degree_backward < reduced_from:
+                    warnings.warn(
+                        f"reduced max_degree_backward from {reduced_from} to "
+                        f"{max_degree_backward} to keep the D x D moment matrix under "
+                        f"{MAX_BACKWARD_MOMENT_BYTES / 2**30:.1f} GiB (n_outputs = {self.n_outputs}).",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                if D_back * D_back * 8 > MAX_BACKWARD_MOMENT_BYTES:
+                    raise ValueError(
+                        f"even degree 0 builds a D = {D_back} basis with n_outputs = "
+                        f"{self.n_outputs}; the backward moment matrix would exceed "
+                        f"{MAX_BACKWARD_MOMENT_BYTES / 2**30:.1f} GiB."
+                    )
 
             self.generate_backward_emulator(X_train, 
                                             Y_train,
@@ -596,7 +667,13 @@ class PolyEmu():
             else:
                 init_deg = 2
 
-        assert init_deg <= max_degree, "Initial degree must be less than or equal to max_degree"
+        check_degree_range(
+            init_deg,
+            max_degree,
+            direction="forward",
+            n_train=X_train_scaled.shape[0],
+            n_params=self.n_params,
+        )
 
         RMSE_val_list = []
         AIC_list = []
@@ -750,7 +827,13 @@ class PolyEmu():
             else:
                 init_deg = 2
 
-        assert init_deg <= max_degree, "Initial degree must be less than or equal to max_degree"
+        check_degree_range(
+            init_deg,
+            max_degree,
+            direction="backward",
+            n_train=Y_train_scaled.shape[0],
+            n_params=self.n_outputs,
+        )
 
         coeffs_list = []
         RMSE_val_list = []

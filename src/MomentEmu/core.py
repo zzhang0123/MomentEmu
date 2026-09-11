@@ -182,6 +182,9 @@ def press_loo(
     raise_at: float = COND_RAISE,
     degree: int | None = None,
     weights=None,
+    plan=None,
+    X_scaled=None,
+    batch_size: int | None = None,
 ):
     """Fit and evaluate leave-one-out PRESS from one Cholesky factor (P1.5).
 
@@ -198,9 +201,18 @@ def press_loo(
 
     M = np.asarray(M, dtype=np.float64)
     nu = np.asarray(nu, dtype=np.float64)
-    Phi = np.asarray(Phi, dtype=np.float64)
+    if Phi is None:
+        if plan is None or X_scaled is None:
+            raise ValueError(
+                "press_loo needs Phi, or plan and X_scaled for a batched run "
+                "(no full Phi materialised)."
+            )
+        X_scaled = np.asarray(X_scaled, dtype=np.float64)
+        N = int(X_scaled.shape[0])
+    else:
+        Phi = np.asarray(Phi, dtype=np.float64)
+        N = Phi.shape[0]
     Y = np.asarray(Y, dtype=np.float64)
-    N = Phi.shape[0]
     rep = check_conditioning(
         M,
         warn_at=warn_at,
@@ -226,41 +238,69 @@ def press_loo(
     if rep.cond >= raise_at:
         # P5.4: make the QR refit reachable on the default LOO path; the
         # leverage below still comes from the (successful) Cholesky factor.
+        Phi_qr = Phi if Phi is not None else plan.evaluate(X_scaled)
         coeffs_qr, _ = solve_emulator_coefficients(
             M, nu, on_singular=on_singular, warn_at=warn_at, raise_at=raise_at,
-            degree=degree, return_cond=True, Phi=Phi, Y=Y,
+            degree=degree, return_cond=True, Phi=Phi_qr, Y=Y,
         )
         if np.isfinite(coeffs_qr).all():
             coeffs = coeffs_qr
     check_coefficients_finite(coeffs, degree=degree)
-    # A = U^{-T} Phi^T  (each column is U^{-T} Phi_i).
-    A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
     if weights is None:
-        h = np.einsum("ij,ij->j", A, A) / N
         w_col = None
     else:
         w = np.asarray(weights, dtype=np.float64).reshape(-1)
-        w = w / w.mean()
-        h = w * np.einsum("ij,ij->j", A, A) / N
-        w_col = w
-    res = Y - Phi @ coeffs
-    denom = 1.0 - h
-    if np.any(denom <= 0):
+        w_col = w / w.mean()
+    denom_bad = False
+    h_max = 0.0
+    press = np.zeros(nu.shape[1], dtype=np.float64)
+    bs = int(batch_size) if batch_size else N
+    if Phi is not None and bs >= N:
+        # A = U^{-T} Phi^T  (each column is U^{-T} Phi_i).
+        A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
+        colsum = np.einsum("ij,ij->j", A, A)
+        h = colsum / N if w_col is None else w_col * colsum / N
+        res = Y - Phi @ coeffs
+        denom = 1.0 - h
+        denom_bad = bool(np.any(denom <= 0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if w_col is None:
+                press = np.sum((res / denom[:, None]) ** 2, axis=0)
+            else:
+                # WLS PRESS weights each deleted residual by w_i, not w_i^2.
+                press = np.sum(w_col[:, None] * (res / denom[:, None]) ** 2, axis=0)
+        h_max = float(h.max())
+    else:
+        # B-memory: bound the peak by batch_size x D instead of N x D (and
+        # avoid the D x N triangular-solve result); accumulate batch by batch.
+        # A resident Phi is sliced, otherwise the plan evaluates each batch.
+        use_plan = Phi is None
+        for s in range(0, N, bs):
+            e = min(s + bs, N)
+            Pb = plan.evaluate(X_scaled[s:e]) if use_plan else Phi[s:e]
+            Ab = solve_triangular(cf, Pb.T, lower=lower, trans="T", check_finite=False)
+            colsum = np.einsum("ij,ij->j", Ab, Ab)
+            hb = colsum / N if w_col is None else w_col[s:e] * colsum / N
+            h_max = max(h_max, float(hb.max()))
+            denb = 1.0 - hb
+            if np.any(denb <= 0):
+                denom_bad = True
+            resb = Y[s:e] - Pb @ coeffs
+            with np.errstate(divide="ignore", invalid="ignore"):
+                if w_col is None:
+                    press += np.sum((resb / denb[:, None]) ** 2, axis=0)
+                else:
+                    press += np.sum(w_col[s:e, None] * (resb / denb[:, None]) ** 2, axis=0)
+    if denom_bad:
         warnings.warn(
             f"degree {degree}: leave-one-out leverage reached 1 "
-            f"(max {float(h.max()):.6g}); the LOO error is undefined for those rows.",
+            f"(max {h_max:.6g}); the LOO error is undefined for those rows.",
             IllConditionedWarning,
             stacklevel=2,
         )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        if w_col is None:
-            press = np.sum((res / denom[:, None]) ** 2, axis=0)
-        else:
-            # WLS PRESS weights each deleted residual by w_i, not w_i^2.
-            press = np.sum(w_col[:, None] * (res / denom[:, None]) ** 2, axis=0)
     loo_per_output = np.sqrt(press / N)
     loo_rmse = float(np.sqrt(np.mean(press) / N))
-    return coeffs, rep.cond, loo_rmse, loo_per_output, float(h.max())
+    return coeffs, rep.cond, loo_rmse, loo_per_output, h_max
 
 
 def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):

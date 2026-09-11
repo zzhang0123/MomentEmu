@@ -55,6 +55,10 @@ MAX_BACKWARD_MOMENT_BYTES = 1 << 30  # 1 GiB
 # batch that disables batching for every realistic N.
 DEFAULT_BATCH_SIZE = 10000
 
+# B-memory: the LOO path keeps the full Phi resident only when it fits this
+# budget; above it the batched bordered build bounds the peak by batch_size.
+PHI_BUDGET_BYTES = 512 * 1024 ** 2
+
 logger = logging.getLogger("MomentEmu")
 logger.addHandler(logging.NullHandler())
 
@@ -1075,6 +1079,7 @@ class PolyEmu:
         cond_list = []
         loo_per_output_list = []
         leverage_list = []
+        moment_list = []
         import time
 
         # D16: a k-level axis identifies x_i^d only for d <= k - 1, so drop
@@ -1120,10 +1125,24 @@ class PolyEmu:
             "indices": None,
             "phi": None,
             "phiw": None,
+            "buf": None,
+            "cap": 0,
             "M": None,
             "nu": None,
         }
         _used_incremental = False
+        # Decide once whether the LOO path may keep the full Phi resident.
+        _D_est = (
+            int(self.basis.build(self.parameter_names, max_degree).shape[0])
+            if self.basis is not None
+            else basis_size(self.n_params, max_degree)
+        )
+        _use_batched_loo = bool(
+            loo
+            and batch_size < _N_train
+            and _N_train * _D_est * 8 > PHI_BUDGET_BYTES
+        )
+
 
         def _moments(idx):
             """Moment products for idx, bordering the previous rung when possible."""
@@ -1148,9 +1167,24 @@ class PolyEmu:
                     Phi_new = MonomialPlan.build(new).evaluate(X_train_scaled)
                 else:
                     Phi_new = np.empty((_N_train, 0))
-                Phi = np.hstack([_inc["phi"], Phi_new])
+                # Grow one buffer in place instead of hstacking (which holds two
+                # full N x D arrays at the largest rung).
+                prev_D = prev.shape[0]
+                new_D = prev_D + new.shape[0]
+                if _inc["buf"] is None or new_D > int(_inc["cap"]):
+                    cap = max(new_D, int(int(_inc["cap"]) * 1.5) + 1, 64)
+                    buf = np.empty((_N_train, cap))
+                    if prev_D:
+                        buf[:, :prev_D] = _inc["phi"]
+                    _inc["buf"] = buf
+                    _inc["cap"] = cap
+                else:
+                    buf = _inc["buf"]
+                if new.shape[0]:
+                    buf[:, prev_D:new_D] = Phi_new
+                Phi = buf[:, :new_D]
                 if _w_norm is None:
-                    cross = _inc["phi"].T @ Phi_new
+                    cross = Phi[:, :prev_D].T @ Phi_new
                     M = np.block([
                         [_inc["M"], cross / _N_train],
                         [cross.T / _N_train, (Phi_new.T @ Phi_new) / _N_train],
@@ -1228,10 +1262,24 @@ class PolyEmu:
                 # Fit on all N and score by exact leave-one-out PRESS from the
                 # same Cholesky factor (P1.5). The metric in RMSE_val_list is
                 # the LOO-RMSE, so selection is uniform.
-                M, nu, Phi = _moments(multi_indices)
+                if not _use_batched_loo:
+                    # The full Phi fits the budget (or the caller asked for a
+                    # single batch): use the fast incremental path.
+                    M, nu, Phi = _moments(multi_indices)
+                    _plan_loo = None
+                else:
+                    # Default: batch_size bounds the peak; no full Phi is held.
+                    M, nu = compute_moments_vector_output_batched(
+                        X_train_scaled, Y_train_scaled, multi_indices,
+                        batch_size=batch_size, weights=weights,
+                    )
+                    Phi = None
+                    _plan_loo = MonomialPlan.build(multi_indices)
                 coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
                     M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d,
-                    weights=weights,
+                    weights=weights, plan=_plan_loo,
+                    X_scaled=None if Phi is not None else X_train_scaled,
+                    batch_size=batch_size,
                 )
                 if not np.isfinite(coeffs).all():
                     stop_reason = "Cholesky failed"
@@ -1276,6 +1324,7 @@ class PolyEmu:
             coeffs_list.append(coeffs)
             multi_indices_list.append(multi_indices)
             running_time_list.append(time.time() - start_time)
+            moment_list.append(M)
 
             if cond >= COND_RAISE and not _qr_used and (loo or validation_is_training):
                 stop_reason = "cond(M) >= 1e16"
@@ -1334,27 +1383,33 @@ class PolyEmu:
         self.forward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.forward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
         # Cholesky factor of the selected moment matrix, kept for leverage().
-        # Reuse the last incremental Phi when the selected rung is the last one
-        # fitted (the common case); otherwise rebuild it once.
+        # moment_list holds the D x D matrix of every rung, so the default
+        # (batched) path never materialises the full N x D Phi here either.
+        _M = moment_list[ind]
+        self.forward_moment_matrix_ = _M
+        self.forward_chol_ = _safe_cholesky(_M)
+        self.forward_N_train_ = int(X_train_scaled.shape[0])
+        # Per-output residual standard deviation in the fitted (standardized Y)
+        # space, used by the noise-only predictive band (P3.5). Accumulate the
+        # residual sum of squares in batches when no full Phi is held.
+        _dof = max(self.forward_N_train_ - multi_indices.shape[0], 1)
         if (
             loo
             and _inc.get("phi") is not None
             and _inc.get("indices") is not None
             and np.array_equal(np.asarray(multi_indices), _inc["indices"])
         ):
-            _Phi = _inc["phi"]
+            _rss = np.sum((Y_train_scaled - _inc["phi"] @ coeffs) ** 2, axis=0)
         else:
+            _rss = np.zeros(self.n_outputs)
             _final_plan = MonomialPlan.build(multi_indices)
-            _Phi = _final_plan.evaluate(X_train_scaled)
-        _M = _Phi.T @ _Phi / X_train_scaled.shape[0]
-        self.forward_moment_matrix_ = _M
-        self.forward_chol_ = _safe_cholesky(_M)
-        self.forward_N_train_ = int(X_train_scaled.shape[0])
-        # Per-output residual standard deviation in the fitted (standardized Y)
-        # space, used by the noise-only predictive band (P3.5).
-        _resid = Y_train_scaled - _Phi @ coeffs
-        _dof = max(self.forward_N_train_ - multi_indices.shape[0], 1)
-        self.forward_resid_std_ = np.sqrt(np.sum(_resid ** 2, axis=0) / _dof)
+            for _s in range(0, self.forward_N_train_, batch_size):
+                _e = min(_s + batch_size, self.forward_N_train_)
+                _rb = Y_train_scaled[_s:_e] - _final_plan.evaluate(
+                    X_train_scaled[_s:_e]
+                ) @ coeffs
+                _rss += np.sum(_rb ** 2, axis=0)
+        self.forward_resid_std_ = np.sqrt(_rss / _dof)
         self._build_forward_plan()
 
     def _build_forward_plan(self):

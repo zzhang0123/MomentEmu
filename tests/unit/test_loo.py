@@ -6,7 +6,12 @@ import pytest
 from scipy.linalg import cho_factor, solve_triangular
 
 from MomentEmu.core import press_loo
-from MomentEmu.emulator import PolyEmu, evaluate_monomials_lazy, generate_multi_indices
+from MomentEmu.emulator import (
+    MonomialPlan,
+    PolyEmu,
+    evaluate_monomials_lazy,
+    generate_multi_indices,
+)
 
 
 def _design(seed=0, N=120, n=2, d=5):
@@ -36,6 +41,23 @@ def test_press_equals_brute_force_refits():
         press_bf += r
     loo_bf = np.sqrt(press_bf / N)
     np.testing.assert_allclose(loo_per_out, loo_bf, rtol=1e-9, atol=1e-12)
+
+
+def test_press_loo_batched_matches_full_phi():
+    """B-memory: the batched (no full Phi) PRESS matches the resident-Phi one."""
+    X, Y, mi, Phi = _design(seed=3)
+    N = X.shape[0]
+    M = Phi.T @ Phi / N
+    nu = Phi.T @ Y / N
+    full = press_loo(M, nu, Phi, Y, on_singular="raise")
+    batched = press_loo(
+        M, nu, None, Y, on_singular="raise",
+        plan=MonomialPlan.build(mi), X_scaled=X, batch_size=17,
+    )
+    np.testing.assert_allclose(batched[0], full[0], rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(batched[2], full[2], rtol=1e-12)
+    np.testing.assert_allclose(batched[3], full[3], rtol=1e-12)
+    assert batched[4] == pytest.approx(full[4], rel=1e-12)
 
 
 def test_hat_diagonal_sums_to_D():

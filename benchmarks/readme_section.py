@@ -57,16 +57,20 @@ def main(d):
     p("")
     ros_def, ros_fix = acc[("rosenbrock", "default")], acc[("rosenbrock", "fixed_d4")]
     p(f"- Rosenbrock is a quartic polynomial. At fixed degree 4 the fit is exact to nRMSE {fmt(ros_fix['test_nrmse'], 2)}; "
-      f"with the default `dim_reduction=True` the pruning step keeps {ros_def['D_final']} of {ros_fix['D_final']} modes and the "
-      f"test nRMSE becomes {fmt(ros_def['test_nrmse'], 2)}.")
+      f"the default sweep selects the same degree-4 basis (D = {ros_def['D_final']}) and reaches nRMSE "
+      f"{fmt(ros_def['test_nrmse'], 2)}. 2.0.0 removed the old `dim_reduction` pruning (D15), which used to drop modes "
+      f"and raise this error.")
     hit = [t for t in targets if acc[(t, "default")]["sweep_hit_D_ge_N"]]
     shares = []
     for t in hit:
         r = acc[(t, "default")]
         shares.append(f"{t} {r['rung_seconds'][-1] / sum(r['rung_seconds']) * 100:.0f}%")
-    p(f"- With default settings the degree sweep ends on a rung with D >= N_train in {len(hit)} of {len(targets)} targets "
-      f"(`max_order` returns the first degree with D >= N). That singular rung is the largest share of the default fit time: "
-      f"{', '.join(shares)}.")
+    if hit:
+        p(f"- With default settings the degree sweep ends on a rung with D >= N_train in {len(hit)} of {len(targets)} "
+          f"targets; that singular rung is the largest share of the default fit time: {', '.join(shares)}.")
+    else:
+        p("- The P0.6 sample-count guard caps every default sweep at D <= N_train / 2, so no target ends on a "
+          "singular rung; the sweep stops on the RMSE criterion or the degree cap.")
     sg = acc[("sobol_g", "fixed_d5")]
     p(f"- The Sobol G-function has |4x-2| kinks; the degree-5 polynomial reaches nRMSE {fmt(sg['test_nrmse'], 2)} "
       f"(max rel err {fmt(sg['test_sa_max_rel'], 2)}). A total-degree polynomial does not converge on a kink.")
@@ -86,8 +90,8 @@ def main(d):
     inf_ratio = [base[(t, "momentemu")]["infer_single_us"] / base[(t, "poly_lr")]["infer_single_us"] for t in targets]
     p(f"- `PolynomialFeatures + LinearRegression` is the same model: coefficients agree to {fmt(worst_coef, 2)} relative or better "
       f"on every target. MomentEmu's normal-equation solve is {fmt(min(fit_ratio), 2)}-{fmt(max(fit_ratio), 2)}x faster to fit; "
-      f"its single-point inference is {fmt(min(inf_ratio), 2)}-{fmt(max(inf_ratio), 2)}x slower, because `evaluate_monomials_lazy` "
-      f"is a Python loop over the D basis functions.")
+      f"its single-point inference is {fmt(min(inf_ratio), 2)}-{fmt(max(inf_ratio), 2)}x slower, because the P0.7 recursive "
+      f"plan evaluates the design row in Python while sklearn uses one BLAS call.")
     gp_wins = [t for t in targets if base[(t, "gp_rbf_white")]["test_nrmse"] < base[(t, "momentemu")]["test_nrmse"]]
     gp_ratio = {t: base[(t, "momentemu")]["test_nrmse"] / base[(t, "gp_rbf_white")]["test_nrmse"] for t in targets}
     p(f"- The GP (N capped at 2000) has lower test error than the polynomial on {len(gp_wins)} of {len(targets)} targets, by "
@@ -151,9 +155,11 @@ def main(d):
     r = mem[(50000, 1000, True)]
     r0 = mem[(50000, 1000, False)]
     p("")
-    p(f"- `batch_size` bounds the design matrix during the sweep, but `dim_reduction=True` (the default) rebuilds the full "
-      f"N x D matrix afterwards: at N = 50000, batch_size = 1000 the tracemalloc peak is {fmt(r0['tracemalloc_peak_MB'])} MB "
-      f"with dim_reduction off and {fmt(r['tracemalloc_peak_MB'])} MB with it on.")
+    p(f"- At N = 50000, batch_size = 1000 the tracemalloc peak is {fmt(r0['tracemalloc_peak_MB'])} MB versus "
+      f"{fmt(mem[(50000, 10000, False)]['tracemalloc_peak_MB'])} MB at the default 10000: the LOO sweep keeps the full Phi "
+      f"resident while N x D x 8 fits the 512 MiB budget, and batches the leverage/PRESS pass by batch_size. Set "
+      f"MOMENTEMU_PHI_BUDGET_BYTES=0 to force the fully batched path (lower peak, about 1.4x the fit time). "
+      f"`dim_reduction` is ignored in 2.0.0 (D15).")
     p("")
     p("### Backends (CMB-like emulator, D = 462, m = 2000)")
     p("")
@@ -166,7 +172,7 @@ def main(d):
     p("")
     rep = max(r["drift_repeat_rel"] for r in pins)
     b256 = max(r["drift_batch256_rel"] for r in pins)
-    p(f"- Five fixed-seed pins (`bench/results/pins.json`) record test RMSE and the first ten coefficients. Repeating a fit "
+    p(f"- Five fixed-seed pins (`results/pins.json`) record test RMSE and the first ten coefficients. Repeating a fit "
       f"in-process reproduces the coefficients to {fmt(rep, 1)} relative; changing `batch_size` (summation order) moves them by "
       f"up to {fmt(b256, 1)} relative. The gate tolerance is 1e-10.")
     n1, n2 = noise[("ishigami",)], noise[("cmb_like",)]

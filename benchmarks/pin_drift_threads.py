@@ -27,7 +27,7 @@ def _run_pins(threads, out):
     if threads is not None:
         for k in ("VECLIB_MAXIMUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
             env[k] = str(threads)
-    subprocess.run([sys.executable, "-m", "bench", "--suites", "pins", "--out", out],
+    subprocess.run([sys.executable, "-m", "benchmarks", "--suites", "pins", "--out", out],
                    cwd=BENCH_ROOT, env=env, check=True, capture_output=True, text=True, timeout=1200)
     return read_json(os.path.join(out, "pins.json"))["rows"]
 

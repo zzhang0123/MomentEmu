@@ -1,0 +1,56 @@
+{
+ "suite": "backends",
+ "rows": [
+  {
+   "backend": "numpy (PolyEmu.forward_emulator)",
+   "note": "D=462, m=2000",
+   "single_us": 89.99771986953375,
+   "single_median_us": 90.65788147136958,
+   "batch_n": 1000,
+   "batch_us": 5398.525641514704,
+   "batch_median_us": 5416.842947642391,
+   "batch_per_sample_us": 5.398525641514704,
+   "single_cpu_us": 89.8885542168681,
+   "batch_cpu_us": 10861.153846153826,
+   "max_rel_diff_vs_numpy": 0.0
+  },
+  {
+   "backend": "jax (create_jax_emulator, jit, x64)",
+   "jax_compile_single_ms": 63.609750010073185,
+   "jax_compile_batch_ms": 68.80512507632375,
+   "note": "first-call (compile) single 64 ms, batch 69 ms; 0.10.0, cpu",
+   "single_us": 88.16458711000826,
+   "single_median_us": 92.23731264112496,
+   "batch_n": 1000,
+   "batch_us": 3714.603362963177,
+   "batch_median_us": 3771.6714611563543,
+   "batch_per_sample_us": 3.714603362963177,
+   "single_cpu_us": 151.84193011647648,
+   "batch_cpu_us": 51470.07692307692,
+   "single_us_device_input": 74.70851769761705,
+   "batch_us_device_input": 3734.5856479886506,
+   "max_rel_diff_vs_numpy": 2.378967102522392e-15
+  },
+  {
+   "backend": "torch (TorchMomentEmu, float64, no_grad)",
+   "note": "torch 2.11.0",
+   "single_us": 868.3378458954394,
+   "batch_us": 5814.629613370117,
+   "batch_per_sample_us": 5.814629613370117,
+   "max_rel_diff_vs_numpy": 2.9762446804860905e-15
+  }
+ ],
+ "wall_s": 8.980272625107318,
+ "loadavg_start": [
+  8.29,
+  10.71,
+  10.25
+ ],
+ "loadavg_end": [
+  7.77,
+  10.52,
+  10.18
+ ],
+ "waited_for_load_s": 7.867813110351562e-06,
+ "max_load": 14.0
+}

@@ -1,6 +1,6 @@
 """Suite 3d: peak memory of a fit vs N at batch_size in {None, 1000, 10000}.
 
-Each cell runs in a fresh subprocess (bench.memcell) so ru_maxrss is per cell.
+Each cell runs in a fresh subprocess (benchmarks.memcell) so ru_maxrss is per cell.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ BENCH_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _cell(N: int, bs, dim_reduction: bool) -> dict:
-    args = [sys.executable, "-m", "bench.memcell", str(N), "none" if bs is None else str(bs), "1" if dim_reduction else "0"]
+    args = [sys.executable, "-m", "benchmarks.memcell", str(N), "none" if bs is None else str(bs), "1" if dim_reduction else "0"]
     env = dict(os.environ, PYTHONPATH=BENCH_ROOT)
     out = subprocess.run(args, capture_output=True, text=True, cwd=BENCH_ROOT, env=env, check=True, timeout=1800)
     return json.loads(out.stdout.strip().splitlines()[-1])

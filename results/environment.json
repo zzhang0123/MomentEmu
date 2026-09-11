@@ -1,0 +1,19 @@
+{
+ "timestamp_utc": "2026-09-11T23:31:24+00:00",
+ "python": "3.12.9",
+ "platform": "macOS-26.5-arm64-arm-64bit",
+ "cpu": "Apple M3 Ultra",
+ "n_cpu": 28,
+ "numpy": "2.3.5",
+ "scipy": "1.16.3",
+ "sklearn": "1.8.0",
+ "blas": "accelerate",
+ "momentemu_file": "/Users/zzhang/Workspace/MomentEmu/src/MomentEmu/__init__.py",
+ "momentemu_git_sha": "9a98c63",
+ "loadavg_at_start": [
+  11.23,
+  11.48,
+  10.48
+ ],
+ "thread_env": {}
+}

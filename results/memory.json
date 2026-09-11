@@ -1,0 +1,148 @@
+{
+ "suite": "memory",
+ "rows": [
+  {
+   "N": 2000,
+   "batch_size": null,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.4929194999858737,
+   "tracemalloc_peak_MB": 90.157659,
+   "rss_peak_MB": 285.933568,
+   "rss_before_fit_MB": 47.5136,
+   "data_MB": 1.696,
+   "phi_full_MB": 7.392
+  },
+  {
+   "N": 2000,
+   "batch_size": 1000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.4420874170027673,
+   "tracemalloc_peak_MB": 83.194777,
+   "rss_peak_MB": 274.874368,
+   "rss_before_fit_MB": 48.3328,
+   "data_MB": 1.696,
+   "phi_full_MB": 7.392
+  },
+  {
+   "N": 2000,
+   "batch_size": 10000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.51581941684708,
+   "tracemalloc_peak_MB": 90.156527,
+   "rss_peak_MB": 293.126144,
+   "rss_before_fit_MB": 48.021504,
+   "data_MB": 1.696,
+   "phi_full_MB": 7.392
+  },
+  {
+   "N": 10000,
+   "batch_size": null,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.5415277080610394,
+   "tracemalloc_peak_MB": 159.148984,
+   "rss_peak_MB": 457.900032,
+   "rss_before_fit_MB": 85.164032,
+   "data_MB": 8.48,
+   "phi_full_MB": 36.96
+  },
+  {
+   "N": 10000,
+   "batch_size": 1000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.4973534159362316,
+   "tracemalloc_peak_MB": 89.977536,
+   "rss_peak_MB": 400.326656,
+   "rss_before_fit_MB": 69.238784,
+   "data_MB": 8.48,
+   "phi_full_MB": 36.96
+  },
+  {
+   "N": 10000,
+   "batch_size": 10000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.4091274589300156,
+   "tracemalloc_peak_MB": 159.150024,
+   "rss_peak_MB": 439.140352,
+   "rss_before_fit_MB": 76.333056,
+   "data_MB": 8.48,
+   "phi_full_MB": 36.96
+  },
+  {
+   "N": 50000,
+   "batch_size": null,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.5361601249314845,
+   "tracemalloc_peak_MB": 227.14521,
+   "rss_peak_MB": 629.817344,
+   "rss_before_fit_MB": 167.215104,
+   "data_MB": 42.4,
+   "phi_full_MB": 184.8
+  },
+  {
+   "N": 50000,
+   "batch_size": 1000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.6402727090753615,
+   "tracemalloc_peak_MB": 155.068732,
+   "rss_peak_MB": 567.21408,
+   "rss_before_fit_MB": 166.477824,
+   "data_MB": 42.4,
+   "phi_full_MB": 184.8
+  },
+  {
+   "N": 50000,
+   "batch_size": 10000,
+   "dim_reduction": false,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.4998877921607345,
+   "tracemalloc_peak_MB": 227.147852,
+   "rss_peak_MB": 637.485056,
+   "rss_before_fit_MB": 166.363136,
+   "data_MB": 42.4,
+   "phi_full_MB": 184.8
+  },
+  {
+   "N": 50000,
+   "batch_size": 1000,
+   "dim_reduction": true,
+   "D": 462,
+   "m": 100,
+   "fit_s": 2.6282906248234212,
+   "tracemalloc_peak_MB": 155.070558,
+   "rss_peak_MB": 575.471616,
+   "rss_before_fit_MB": 165.789696,
+   "data_MB": 42.4,
+   "phi_full_MB": 184.8
+  }
+ ],
+ "wall_s": 27.498473166953772,
+ "loadavg_start": [
+  11.23,
+  11.48,
+  10.48
+ ],
+ "loadavg_end": [
+  9.34,
+  11.02,
+  10.35
+ ],
+ "waited_for_load_s": 6.9141387939453125e-06,
+ "max_load": 14.0
+}

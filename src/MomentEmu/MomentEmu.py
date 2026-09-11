@@ -116,6 +116,15 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
         
     Returns: mask array, where True means the mode is kept. Of shape D if homogeneous, otherwise of shape D x m.
     """
+    warnings.warn(
+        "filter_modes is deprecated and will be removed in 3.0.0; post-hoc mode "
+        "pruning raised validation RMSE by up to 963x and produced bases that are "
+        "not downward closed. Use a declared basis (P5.3) or the low-rank / float32 "
+        "storage options (P5.7) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # Input validation
     if coeffs.ndim != 2:
         raise ValueError("coeffs must be a 2D array of shape (D, m)")

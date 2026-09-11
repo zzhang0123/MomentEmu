@@ -27,7 +27,6 @@ from MomentEmu.MomentEmu import (
     solve_emulator_coefficients,
     predictive_mse_aic_bic,
     select_best_model,
-    filter_modes,
     signal_aware_frac_err,
 )
 
@@ -415,7 +414,7 @@ class PolyEmu():
                 init_deg_backward=None, 
                 max_degree_forward=None,
                 max_degree_backward=None,
-                dim_reduction=True,
+                dim_reduction=False,
                 per_mode_thres=None,
                 return_max_frac_err=False,
                 standardize_Y_with_std=True,
@@ -434,9 +433,9 @@ class PolyEmu():
         backward: whether to generate backward emulator.
         init_deg_forward, init_deg_backward: initial polynomial degree for forward/backward emulators.
         max_degree_forward, max_degree_backward: maximum polynomial degree for forward/backward emulators.
-        dim_reduction: whether to perform dimension reduction after fitting.
+        dim_reduction: retired in 2.0.0 (D15); True only emits a DeprecationWarning.
 
-        per_mode_thres: threshold for dimension reduction per mode.
+        per_mode_thres: retired in 2.0.0 (D15); a value only warns.
         return_max_frac_err: whether to compute and store the signal-aware
             fractional-error diagnostic on the validation set. See the
             "Validation diagnostics" section below for the attributes set
@@ -477,6 +476,19 @@ class PolyEmu():
         # numpy-only inference path do not pay for sklearn (P0.9).
         from sklearn.model_selection import train_test_split
         from sklearn.preprocessing import StandardScaler
+
+        # D15: post-hoc mode pruning is retired in 2.0.0. Keep accepting the
+        # arguments for one release but ignore them, with one warning.
+        if dim_reduction or per_mode_thres is not None:
+            warnings.warn(
+                "dim_reduction / per_mode_thres were removed in 2.0.0 (D15) and "
+                "are ignored: the default pruning raised validation RMSE up to "
+                "963x and pruned sets are not downward closed. For a smaller "
+                "basis use basis= (P5.3); for smaller storage use the low-rank "
+                "or float32 options (P5.7).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
@@ -830,29 +842,6 @@ class PolyEmu():
         self.foward_degree = degree_list[ind]
         self.forward_cond_est_ = cond_list[ind]
 
-        if dim_reduction:
-            print("Performing dimension reduction...")
-            Mm, _ = compute_moments_vector_output(X_train_scaled, Y_train_scaled, multi_indices)
-            if per_mode_thres is None:
-                threshold = RMSE_tol * 1e-4
-            else:
-                threshold = min(per_mode_thres, RMSE_tol)
-            mask = filter_modes(coeffs, Mm, threshold=threshold)
-            multi_indices = multi_indices[mask]
-            print(f"Dimension reduced  from {coeffs.shape[0]} modes to {multi_indices.shape[0]} modes.")
-            Mm, nu = compute_moments_vector_output(X_train_scaled, Y_train_scaled, multi_indices)
-            coeffs = solve_emulator_coefficients(Mm, nu)
-
-            # Y_val_pred = evaluate_emulator(X_val_scaled, coeffs, multi_indices)
-            Y_val_pred = evaluate_emulator_batched(
-                X_val_scaled, coeffs, multi_indices, batch_size=batch_size
-            )
-            
-            RMSE_val, AIC, BIC = predictive_mse_aic_bic(Y_val_scaled, Y_val_pred, multi_indices.shape[0], n_train=X_train_scaled.shape[0])
-            print(f"After the dimension reduction, the RMSE: {RMSE_val}, AIC: {AIC}, BIC: {BIC}")
-
-
-
         self.forward_coeffs = coeffs
         self.forward_multi_indices = multi_indices
         self.forward_RMSE_list = RMSE_val_list
@@ -860,6 +849,11 @@ class PolyEmu():
         self.forward_BIC_list = BIC_list
         self.forward_running_time_list = running_time_list
         self.forward_degree_list = degree_list
+        # Metrics of the model actually stored (the old dim_reduction path
+        # reported the pre-pruning model).
+        self.forward_RMSE = float(RMSE_val_list[ind])
+        self.forward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
+        self.forward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
         self._build_forward_plan()
 
     def _build_forward_plan(self):
@@ -1087,25 +1081,6 @@ class PolyEmu():
         self.backward_degree = degree_list[ind]
         self.backward_cond_est_ = cond_list[ind]
 
-        if dim_reduction:
-            print("Performing dimension reduction...")
-            Mm, _ = compute_moments_vector_output(Y_train_scaled, X_train_scaled, multi_indices)
-            if per_mode_thres is None:
-                threshold = RMSE_tol * 1e-2
-            else:
-                threshold = min(per_mode_thres, RMSE_tol)
-            mask = filter_modes(coeffs, Mm, threshold=threshold)
-            multi_indices = multi_indices[mask]
-            print(f"Dimension reduced  from {coeffs.shape[0]} modes to {multi_indices.shape[0]}  modes.")
-            Mm, nu = compute_moments_vector_output(Y_train_scaled, X_train_scaled, multi_indices)
-            coeffs = solve_emulator_coefficients(Mm, nu)
-            # X_val_pred = evaluate_emulator(Y_val_scaled, coeffs, multi_indices)
-            X_val_pred = evaluate_emulator_batched(
-                Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
-            )
-            RMSE_val, AIC, BIC = predictive_mse_aic_bic(X_val_scaled, X_val_pred, multi_indices.shape[0], n_train=Y_train_scaled.shape[0])
-            print(f"After the dimension reduction, the RMSE: {RMSE_val}, AIC: {AIC}, BIC: {BIC}")
-            
         self.backward_coeffs = coeffs
         self.backward_multi_indices = multi_indices
         self.backward_RMSE_list = RMSE_val_list
@@ -1113,6 +1088,9 @@ class PolyEmu():
         self.backward_BIC_list = BIC_list
         self.backward_running_time_list = running_time_list
         self.backward_degree_list = degree_list
+        self.backward_RMSE = float(RMSE_val_list[ind])
+        self.backward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
+        self.backward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
         self._build_backward_plan()
 
     def backward_emulator(self, Y, batch_size=None):

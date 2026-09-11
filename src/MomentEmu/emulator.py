@@ -1150,6 +1150,8 @@ class PolyEmu:
             self.forward_RMSE_per_output_ = np.sqrt(
                 np.mean((_sel_pred - Y_val_scaled) ** 2, axis=0)
             )
+        self._X_train_scaled_ = X_train_scaled
+        self._Y_train_scaled_ = Y_train_scaled
 
         self.forward_coeffs = coeffs
         self.forward_multi_indices = multi_indices
@@ -1515,6 +1517,50 @@ class PolyEmu:
     def predict_inverse(self, Y, **kwargs):
         """Alias for backward_emulator (P4.1)."""
         return self.backward_emulator(Y, **kwargs)
+
+    def compress(self, rank, *, X_val=None, Y_val=None, gate=0.01):
+        """Store a closed-form rank-``rank`` forward coefficient set (P5.7).
+
+        The reduced-rank fit is exact (C_r = L^-T [L^-1 nu]_r). With a
+        validation set the per-output difference from the full-rank
+        predictions is stored, and a difference above ``gate`` times that
+        output validation RMSE raises ValueError (D1).
+        """
+        from MomentEmu.storage import reduced_rank_coefficients
+
+        mi = self.forward_multi_indices
+        Phi = MonomialPlan.build(mi).evaluate(self._X_train_scaled_)
+        N = Phi.shape[0]
+        M = Phi.T @ Phi / N
+        nu = Phi.T @ self._Y_train_scaled_ / N
+        C_r, s = reduced_rank_coefficients(M, nu, rank)
+        old = self.forward_coeffs.copy()
+        if X_val is None or Y_val is None:
+            self.forward_coeffs = C_r
+            self._build_forward_plan()
+            self.forward_rank_ = int(rank)
+            self.forward_singular_values_ = np.asarray(s)
+            return self
+        X_val = np.asarray(X_val, dtype=np.float64)
+        Y_val = np.asarray(Y_val, dtype=np.float64)
+        full = self.forward_emulator(X_val, extrapolation="ignore")
+        self.forward_coeffs = C_r
+        self._build_forward_plan()
+        new = self.forward_emulator(X_val, extrapolation="ignore")
+        diff = np.max(np.abs(new - full), axis=0)
+        val_rmse = np.sqrt(np.mean((full - Y_val) ** 2, axis=0))
+        self.rank_difference_ = diff
+        if np.any(diff > gate * val_rmse):
+            self.forward_coeffs = old
+            self._build_forward_plan()
+            bad = np.flatnonzero(diff > gate * val_rmse).tolist()
+            raise ValueError(
+                f"rank {rank} changes a prediction by more than {gate:.0%} of the "
+                f"validation RMSE for output(s) {bad}; use a higher rank."
+            )
+        self.forward_rank_ = int(rank)
+        self.forward_singular_values_ = np.asarray(s)
+        return self
 
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""

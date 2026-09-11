@@ -64,12 +64,18 @@ def test_logy_ignored_by_all_three_backends(logy_emu):
     assert np.max(np.abs(got - logy_emu.forward_emulator(X))) / np.max(
         np.abs(logy_emu.forward_emulator(X))
     ) < 1e-12
-    # P2.4 added symbolic log_Y export.
+    # P2.3/P2.4: all three backends now support log_Y.
+    import torch
+
     from MomentEmu.symbolic_momentemu import create_symbolic_emulator as make_sym
 
     assert make_sym(logy_emu, ["p0", "p1"])["expression"] is not None
-    with pytest.raises(NotImplementedError):
-        TorchMomentEmu(logy_emu)
+    tm = TorchMomentEmu(logy_emu)
+    with torch.no_grad():
+        got_t = tm(torch.as_tensor(X, dtype=torch.float64)).numpy()
+    assert np.max(np.abs(got_t - logy_emu.forward_emulator(X))) / np.max(
+        np.abs(logy_emu.forward_emulator(X))
+    ) < 1e-13
 
 
 def test_autodiff_wrappers_ignore_log_y(logy_emu):

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from MomentEmu.guards import check_backend_supports, output_scale
+from MomentEmu.guards import output_scale
 from MomentEmu.monomials import MonomialPlan
 
 
@@ -20,8 +20,10 @@ class TorchMomentEmu(nn.Module):
 
     def __init__(self, trained_emulator, dtype=torch.float64):
         super().__init__()
-        check_backend_supports(trained_emulator, "torch")
+        if not hasattr(trained_emulator, "forward_coeffs"):
+            raise ValueError("the Torch backend needs a forward emulator")
         self.dtype = dtype
+        self.log_Y = bool(getattr(trained_emulator, "log_Y", False))
         self.n_params = int(trained_emulator.n_params)
         self.n_outputs = int(trained_emulator.n_outputs)
         self.multi_indices = np.asarray(trained_emulator.forward_multi_indices)
@@ -87,6 +89,8 @@ class TorchMomentEmu(nn.Module):
         X_scaled = (X - self.input_mean) / self.input_scale
         Phi = self.evaluate_monomials(X_scaled)
         Y = Phi @ self.coeffs * self.output_scale + self.output_mean
+        if self.log_Y:
+            Y = torch.exp(Y)
         return Y
 
 

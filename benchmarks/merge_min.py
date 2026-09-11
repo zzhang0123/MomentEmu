@@ -1,7 +1,7 @@
 """Merge several result directories into one baseline by taking, per cell, the
 minimum of every timing field and the first run's value for everything else.
 
-    python -m bench.merge_min run1 run2 run3 --out baseline_dir
+    python -m benchmarks.merge_min run1 run2 run3 --out baseline_dir
 
 Timing fields are those whose name ends in `_s` or `_us` or `_MB`. Taking the
 minimum removes most of the scheduling noise of shared CI runners; the gate

@@ -5,7 +5,7 @@ Runs the pins suite in two subprocesses (VECLIB_MAXIMUM_THREADS / OMP_NUM_THREAD
 RMSE difference per pin, i.e. the drift a 1e-10 gate has to tolerate across
 thread configurations on one machine.
 
-    python -m bench.pin_drift_threads
+    python -m benchmarks.pin_drift_threads
 """
 from __future__ import annotations
 

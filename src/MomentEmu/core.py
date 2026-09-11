@@ -223,6 +223,15 @@ def press_loo(
         nan = float("nan")
         return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
     coeffs = cho_solve((cf, lower), nu, check_finite=False)
+    if rep.cond >= raise_at:
+        # P5.4: make the QR refit reachable on the default LOO path; the
+        # leverage below still comes from the (successful) Cholesky factor.
+        coeffs_qr, _ = solve_emulator_coefficients(
+            M, nu, on_singular=on_singular, warn_at=warn_at, raise_at=raise_at,
+            degree=degree, return_cond=True, Phi=Phi, Y=Y,
+        )
+        if np.isfinite(coeffs_qr).all():
+            coeffs = coeffs_qr
     check_coefficients_finite(coeffs, degree=degree)
     # A = U^{-T} Phi^T  (each column is U^{-T} Phi_i).
     A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
@@ -235,8 +244,6 @@ def press_loo(
         h = w * np.einsum("ij,ij->j", A, A) / N
         w_col = w
     res = Y - Phi @ coeffs
-    if w_col is not None:
-        res = res * w_col[:, None]
     denom = 1.0 - h
     if np.any(denom <= 0):
         warnings.warn(
@@ -246,7 +253,11 @@ def press_loo(
             stacklevel=2,
         )
     with np.errstate(divide="ignore", invalid="ignore"):
-        press = np.sum((res / denom[:, None]) ** 2, axis=0)
+        if w_col is None:
+            press = np.sum((res / denom[:, None]) ** 2, axis=0)
+        else:
+            # WLS PRESS weights each deleted residual by w_i, not w_i^2.
+            press = np.sum(w_col[:, None] * (res / denom[:, None]) ** 2, axis=0)
     loo_per_output = np.sqrt(press / N)
     loo_rmse = float(np.sqrt(np.mean(press) / N))
     return coeffs, rep.cond, loo_rmse, loo_per_output, float(h.max())
@@ -415,7 +426,11 @@ def select_best_model(rmse_list, aic_list=None, bic_list=None, rmse_tol=0.05):
         aic = np.asarray(aic_list, dtype=np.float64)
         best_idx = int(candidate_idxs[np.argmin(aic[candidate_idxs])])
     else:
-        best_idx = int(candidate_idxs[np.argmin(rmse[candidate_idxs])])
+        # P1.5: rmse_list is ordered by increasing degree, so the first
+        # candidate is the simplest model within rmse_tol of the best. This is
+        # what makes rmse_tol act; argmin(rmse) would always return the global
+        # minimum and ignore the tolerance.
+        best_idx = int(candidate_idxs[0])
 
     return best_idx
 

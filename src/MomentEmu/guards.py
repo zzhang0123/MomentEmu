@@ -341,6 +341,14 @@ def check_test_pair(X_test: object, Y_test: object) -> None:
             f"{'None' if X_test is None else 'given'}, Y_test="
             f"{'None' if Y_test is None else 'given'})"
         )
+    if X_test is not None:
+        n_x = np.asarray(X_test).shape[0]
+        n_y = np.asarray(Y_test).shape[0]
+        if n_x != n_y:
+            raise ValueError(
+                f"X_test has {n_x} rows but Y_test has {n_y}; the validation "
+                "pair must be row-aligned."
+            )
 
 
 def check_validation_split(

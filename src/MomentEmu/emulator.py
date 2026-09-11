@@ -21,6 +21,7 @@ from MomentEmu.guards import (
     DomainBox,
     ExtrapolationWarning,
     IllConditionedError,
+    IllConditionedWarning,
     InsufficientSamplesError,
     as_float64,
     basis_size,
@@ -580,6 +581,53 @@ def _report_frac_err(
     return diag
 
 
+def _warn_export_conditioning(cond, direction):
+    """D12: warn when a symbolic export starts from cond(M) >= 1e8."""
+    if cond is None:
+        return
+    cond = float(cond)
+    if np.isfinite(cond) and cond >= 1e8:
+        warnings.warn(
+            f"{direction} symbolic export at cond(M) = {cond:.2e} >= 1e8: the "
+            "exported coefficients are not trustworthy to full float64 precision.",
+            IllConditionedWarning,
+            stacklevel=3,
+        )
+
+
+def _safe_cholesky(M):
+    """Cholesky factor M = U^T U, with jitter; None when even that fails (B6).
+
+    A completed degree sweep must not be discarded because the selected rung is
+    numerically singular. On failure the jitter is grown relative to the mean
+    diagonal; leverage() then falls back to the pseudoinverse.
+    """
+    from scipy.linalg import cho_factor
+
+    M = np.asarray(M, dtype=np.float64)
+    try:
+        return cho_factor(M, lower=False, check_finite=False)
+    except np.linalg.LinAlgError:
+        diag = float(np.mean(np.abs(np.diag(M))))
+        if not np.isfinite(diag) or diag <= 0.0:
+            diag = 1.0
+        for jitter in (1e-12, 1e-10, 1e-8):
+            try:
+                return cho_factor(
+                    M + (diag * jitter) * np.eye(M.shape[0]),
+                    lower=False, check_finite=False,
+                )
+            except np.linalg.LinAlgError:
+                continue
+        warnings.warn(
+            "Cholesky factorisation failed even with jitter; leverage() will "
+            "fall back to the pseudoinverse.",
+            IllConditionedWarning,
+            stacklevel=2,
+        )
+        return None
+
+
 class PolyEmu:
     """Polynomial moment-projection emulator; see __init__ for the arguments."""
     # Validation diagnostics, populated only when return_max_frac_err=True.
@@ -593,6 +641,11 @@ class PolyEmu:
     # True when the last forward sweep grew the moment system incrementally
     # (P5.1); overridden per instance after a fit.
     forward_sweep_incremental_: bool = False
+    # Storage-option diagnostics (P5.7/B7), absent unless the option ran.
+    forward_rank_: int | None = None
+    forward_singular_values_: np.ndarray | None = None
+    rank_difference_: np.ndarray | None = None
+    float32_difference_: np.ndarray | None = None
 
     @property
     def foward_degree(self):
@@ -758,6 +811,13 @@ class PolyEmu:
         self._X_data = X
         self._Y_data = Y
         self.basis = basis
+        if basis is not None and backward:
+            raise ValueError(
+                "basis= describes the forward basis over the n_params inputs and "
+                "cannot be applied to the backward map over the n_outputs outputs. "
+                "Fit the forward model with basis=, or fit the backward model only "
+                "(forward=False, backward=True) without basis."
+            )
         self.parameter_names = list(parameter_names) if parameter_names is not None else [f"x{i}" for i in range(X.shape[1])]
 
         self.n_params = X.shape[1]
@@ -1068,6 +1128,15 @@ class PolyEmu:
         def _moments(idx):
             """Moment products for idx, bordering the previous rung when possible."""
             nonlocal _used_incremental
+            if not loo:
+                # P5.2/B1-memory: the held-out path must keep the batched build,
+                # which never materialises the full Phi, so batch_size bounds
+                # the peak. The LOO path needs full Phi for PRESS anyway.
+                M_b, nu_b = compute_moments_vector_output_batched(
+                    X_train_scaled, Y_train_scaled, idx,
+                    batch_size=batch_size, weights=weights,
+                )
+                return M_b, nu_b, None
             prev = _inc["indices"]
             if (
                 prev is not None
@@ -1180,7 +1249,7 @@ class PolyEmu:
                 )
                 if cond >= COND_RAISE:
                     # P5.4: refit this rung with CholeskyQR2 / Householder QR.
-                    _Phi_qr = Phi
+                    _Phi_qr = MonomialPlan.build(multi_indices).evaluate(X_train_scaled)
                     _c_qr, _cond_qr = solve_emulator_coefficients(
                         M, nu, on_singular="warn", degree=d, return_cond=True,
                         Phi=_Phi_qr, Y=Y_train_scaled,
@@ -1265,12 +1334,11 @@ class PolyEmu:
         self.forward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.forward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
         # Cholesky factor of the selected moment matrix, kept for leverage().
-        from scipy.linalg import cho_factor
-
         _final_plan = MonomialPlan.build(multi_indices)
         _Phi = _final_plan.evaluate(X_train_scaled)
         _M = _Phi.T @ _Phi / X_train_scaled.shape[0]
-        self.forward_chol_ = cho_factor(_M, lower=False, check_finite=False)
+        self.forward_moment_matrix_ = _M
+        self.forward_chol_ = _safe_cholesky(_M)
         self.forward_N_train_ = int(X_train_scaled.shape[0])
         # Per-output residual standard deviation in the fitted (standardized Y)
         # space, used by the noise-only predictive band (P3.5).
@@ -1329,9 +1397,13 @@ class PolyEmu:
             self._inv_scale_X = 1.0 / self.scaler_X.scale_
         Xs = (arr - self.scaler_X.mean_) * self._inv_scale_X
         Phi = self.forward_plan.evaluate(Xs)
-        cf, lower = self.forward_chol_
-        A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
-        h = np.einsum("ij,ij->j", A, A) / self.forward_N_train_
+        if getattr(self, "forward_chol_", None) is not None:
+            cf, lower = self.forward_chol_
+            A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
+            h = np.einsum("ij,ij->j", A, A) / self.forward_N_train_
+        else:
+            Minv = np.linalg.pinv(self.forward_moment_matrix_)
+            h = np.einsum("ij,jk,ik->i", Phi, Minv, Phi) / self.forward_N_train_
         return float(h[0]) if h.size == 1 else h
 
     def hat_diagonal(self, X):
@@ -1359,9 +1431,20 @@ class PolyEmu:
         dPhi = self.forward_plan.evaluate_derivatives(Xs)  # (n, N, D)
         J = dPhi @ self.forward_coeffs_folded               # (n, N, m)
         J = J.transpose(1, 2, 0) / self.scaler_X.scale_[None, None, :]
-        if self.log_Y:
-            Y_affine = self.forward_plan.evaluate(Xs) @ self.forward_coeffs_folded
-            J = J * np.exp(Y_affine)[:, :, None]
+        Y_affine = self.forward_plan.evaluate(Xs) @ self.forward_coeffs_folded
+        for j, t in enumerate(self._transforms()):
+            if t == "linear":
+                continue
+            if t == "log":
+                factor = np.exp(Y_affine[:, j])
+            elif t == "asinh":
+                factor = np.cosh(Y_affine[:, j])
+            else:
+                # Callable (forward, inverse) pair: differentiate the inverse.
+                lo = Y_affine[:, j] - 1e-6
+                hi = Y_affine[:, j] + 1e-6
+                factor = (t[1](hi) - t[1](lo)) / 2e-6
+            J[:, j, :] = J[:, j, :] * factor[:, None]
         return J[0] if single else J
 
     def validate(self, X_val, Y_val, sigma=None, cov=None, *, extrapolation="warn"):
@@ -1597,6 +1680,7 @@ class PolyEmu:
             merged['X_test'] = X_val
         if Y_val is not None and 'Y_test' not in merged:
             merged['Y_test'] = Y_val
+        self.__dict__.clear()
         type(self).__init__(self, X, Y, **merged)
         return self
 
@@ -1610,7 +1694,9 @@ class PolyEmu:
         merged.update(kwargs)
         merged['forward'] = True
         merged['backward'] = True
-        type(self).__init__(self, self._X_data, self._Y_data, **merged)
+        X_data, Y_data = self._X_data, self._Y_data
+        self.__dict__.clear()
+        type(self).__init__(self, X_data, Y_data, **merged)
         return self
 
     def predict_inverse(self, Y, **kwargs):
@@ -1635,13 +1721,15 @@ class PolyEmu:
         C_r, s = reduced_rank_coefficients(M, nu, rank)
         old = self.forward_coeffs.copy()
         if X_val is None or Y_val is None:
-            self.forward_coeffs = C_r
-            self._build_forward_plan()
-            self.forward_rank_ = int(rank)
-            self.forward_singular_values_ = np.asarray(s)
-            return self
-        X_val = np.asarray(X_val, dtype=np.float64)
-        Y_val = np.asarray(Y_val, dtype=np.float64)
+            # D1/B7: never apply a storage reduction ungated. Fall back to a
+            # deterministic held-out slice of the training data.
+            X_all = np.asarray(self._X_data, dtype=np.float64)
+            Y_all = np.asarray(self._Y_data, dtype=np.float64)
+            n_val = max(20, X_all.shape[0] // 5)
+            X_val, Y_val = X_all[-n_val:], Y_all[-n_val:]
+        else:
+            X_val = np.asarray(X_val, dtype=np.float64)
+            Y_val = np.asarray(Y_val, dtype=np.float64)
         full = self.forward_emulator(X_val, extrapolation="ignore")
         self.forward_coeffs = C_r
         self._build_forward_plan()
@@ -1827,15 +1915,19 @@ class PolyEmu:
             "explained_variance": explained,
             "total_variance": total_var,
             "explained_fraction": explained / safe_total,
-            # The orthonormal decomposition closes: S1 + all interactions sum to 1.
-            "shares_sum": np.ones(m),
+            # P5.5: the fraction of Var(Y) the orthonormal decomposition
+            # accounts for; meaningful, not identically one.
+            "shares_sum": explained / safe_total,
         }
 
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""
         t = getattr(self, "transform", None)
         if t is None:
-            t = tuple("log" if self.log_Y else "linear" for _ in range(self.n_outputs))
+            # B1: July-2025 pickles store neither transform nor log_Y; treat
+            # missing log_Y as linear instead of raising AttributeError.
+            log_y = bool(getattr(self, "log_Y", False))
+            t = tuple("log" if log_y else "linear" for _ in range(self.n_outputs))
             self.transform = t
         return t
 
@@ -2125,12 +2217,12 @@ class PolyEmu:
         self.backward_RMSE = float(RMSE_val_list[ind])
         self.backward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.backward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
-        from scipy.linalg import cho_factor
 
         _final_plan = MonomialPlan.build(multi_indices)
         _Phi = _final_plan.evaluate(Y_train_scaled)
         _M = _Phi.T @ _Phi / Y_train_scaled.shape[0]
-        self.backward_chol_ = cho_factor(_M, lower=False, check_finite=False)
+        self.backward_moment_matrix_ = _M
+        self.backward_chol_ = _safe_cholesky(_M)
         self.backward_N_train_ = int(Y_train_scaled.shape[0])
         self._build_backward_plan()
 
@@ -2292,6 +2384,7 @@ class PolyEmu:
 
         Standardized z-form by default; log_Y wraps the result in exp.
         """
+        _warn_export_conditioning(getattr(self, "forward_cond_est_", None), "forward")
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
         exprs = symbolic_polynomial_expressions(
             self.forward_coeffs,
@@ -2311,6 +2404,7 @@ class PolyEmu:
 
         z-form by default; log_Y substitutes log of the input variables.
         """
+        _warn_export_conditioning(getattr(self, "backward_cond_est_", None), "backward")
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
         exprs = symbolic_polynomial_expressions(
             self.backward_coeffs,

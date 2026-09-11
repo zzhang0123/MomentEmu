@@ -1,14 +1,14 @@
 # MomentEmu benchmark suite
 
 ```
-python -m bench                       # all suites, results/ (JSON per suite + RESULTS.md)
-python -m bench --suites accuracy,pins --out my_results
-python -m bench --quick               # smoke test, ~4 min
-python -m bench --max-load 8          # wait until the 1-min load average is <= 8 before each suite
-python -m bench.noise_ci_proxy        # timing noise at 2 BLAS threads, idle and under CPU contention
-python -m bench.gate --baseline results_baseline --current results
-python -m bench.merge_min run1 run2 run3 --out baseline   # per-cell min of several runs
-python -m bench.report results        # print the markdown report
+python -m benchmarks                       # all suites, results/ (JSON per suite + RESULTS.md)
+python -m benchmarks --suites accuracy,pins --out my_results
+python -m benchmarks --quick               # smoke test, ~4 min
+python -m benchmarks --max-load 8          # wait until the 1-min load average is <= 8 before each suite
+python -m benchmarks.noise_ci_proxy        # timing noise at 2 BLAS threads, idle and under CPU contention
+python -m benchmarks.gate --baseline results_baseline --current results
+python -m benchmarks.merge_min run1 run2 run3 --out baseline   # per-cell min of several runs
+python -m benchmarks.report results        # print the markdown report
 ```
 
 The package under test is imported from `MOMENTEMU_SRC` (default: the repo

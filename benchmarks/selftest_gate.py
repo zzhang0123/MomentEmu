@@ -2,7 +2,7 @@
 (a) a 1e-9 relative perturbation of one pin coefficient, (b) a 1e-5 relative
 RMSE increase, (c) a 35 % fit-time regression, (d) a D_final change.
 
-    python -m bench.selftest_gate results
+    python -m benchmarks.selftest_gate results
 """
 from __future__ import annotations
 

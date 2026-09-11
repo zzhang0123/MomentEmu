@@ -1,6 +1,6 @@
 """MomentEmu benchmark suite.
 
-Run with ``python -m bench`` from the directory that contains ``bench/``.
+Run with ``python -m benchmarks`` from the directory that contains ``bench/``.
 Every suite writes one JSON file into the results directory and ``report.py``
 turns the JSON files into a markdown table. ``gate.py`` compares two result
 directories with tolerances and exits non-zero on a regression.

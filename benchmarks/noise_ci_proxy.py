@@ -15,7 +15,7 @@ relative tolerance: the fraction of ordered pairs (baseline sample, current
 sample) for which current > baseline * (1 + tol), for a single-shot baseline
 and for a min-of-3 baseline.
 
-    python -m bench.noise_ci_proxy [--out results/noise_ci_proxy.json] [--repeats 7]
+    python -m benchmarks.noise_ci_proxy [--out results/noise_ci_proxy.json] [--repeats 7]
 """
 from __future__ import annotations
 

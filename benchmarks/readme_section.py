@@ -1,6 +1,6 @@
 """Generate the one-page README "Benchmarks" section from a results directory.
 
-    python -m bench.readme_section results > README_benchmarks.md
+    python -m benchmarks.readme_section results > README_benchmarks.md
 
 Every number is read from the JSON files; nothing is typed in by hand.
 """
@@ -37,7 +37,7 @@ def main(d):
     p = out.append
     p("## Benchmarks")
     p("")
-    p(f"Measured with `python -m bench` (see `bench/README.md`) on {env['cpu']}, numpy {env['numpy']} ({env['blas']}), "
+    p(f"Measured with `python -m benchmarks` (see `benchmarks/README.md`) on {env['cpu']}, numpy {env['numpy']} ({env['blas']}), "
       f"MomentEmu {env['momentemu_git_sha']}. Fit times are the minimum of 3 runs; inference times are the minimum "
       f"over 5 blocks of repeated calls. nRMSE = test RMSE / RMS deviation of the target. "
       f"\"max rel err\" is the signal-aware maximum relative error (entries below 1e-3 of the per-output peak are masked).")
@@ -175,7 +175,7 @@ def main(d):
       f"min-of-3 fit max/min {fmt(n1.get('fit_min3_max_over_min'), 2)} and {fmt(n2.get('fit_min3_max_over_min'), 2)}; "
       f"inference max/min {fmt(max(n1['single_max_over_min'], n2['single_max_over_min']), 2)} (1-pt) and "
       f"{fmt(max(n1['batch_max_over_min'], n2['batch_max_over_min']), 2)} (1000-pt). "
-      f"`python -m bench.gate` fails on a fit-time or inference-time regression above 30 %, an RMSE regression above 1e-6 relative, "
+      f"`python -m benchmarks.gate` fails on a fit-time or inference-time regression above 30 %, an RMSE regression above 1e-6 relative, "
       f"or a pin drift above 1e-10.")
     print("\n".join(out))
 

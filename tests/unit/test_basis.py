@@ -59,7 +59,7 @@ def test_f1_q05_anisotropic_beats_isotropic():
         init_deg_forward=16, max_degree_forward=16, RMSE_tol=1e-300, verbose=0,
     )
     D = emu.forward_multi_indices.shape[0]
-    assert D <= 900, D
+    assert D == 67, D  # the q=0.5, max_interaction=2 set at d=16 has 67 terms
     pred = emu.forward_emulator(Xt, extrapolation="ignore")
     rel = float(np.sqrt(np.mean((pred - Yt) ** 2))) / float(np.abs(Yt).max())
     assert rel < 6e-4, rel

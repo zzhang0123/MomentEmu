@@ -1,6 +1,6 @@
 """Performance / accuracy regression gate.
 
-    python -m bench.gate --baseline results_baseline --current results \
+    python -m benchmarks.gate --baseline results_baseline --current results \
         [--time-tol 0.30] [--rmse-tol 1e-6] [--pin-tol 1e-10] [--time-floor-us 50]
 
 Exit status 0 when every check passes, 1 otherwise. Prints one line per check.

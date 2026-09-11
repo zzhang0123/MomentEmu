@@ -264,6 +264,11 @@ reflecting the fact that differentiation acts as a numerically unstable operator
   Use iid uniform or scrambled Sobol samples with N >= 10-20 D.
 - Validate in the units of your data: PolyEmu.validate(X, Y, sigma=...) reports
   Delta-chi2, and posterior_bias reports the linearised shift in sigma.
+- The posterior-shift acceptance protocol (P3.3) is in
+  examples/validate_posterior.py: it compares a simulator posterior with the
+  emulator posterior on the same data and passes when every marginal mean
+  shift is < 0.1 sigma, the Mahalanobis shift is < 0.1 and every width ratio
+  is within 10%.
 - See CHANGELOG.md for the 2.0.0 default-behaviour changes and deprecations.
 
 

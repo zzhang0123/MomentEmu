@@ -23,8 +23,10 @@ def test_incremental_coefficients_match_from_scratch():
     Y = _target(X)
     Xt = rng.uniform(-1.0, 1.0, (500, 6))
     Yt = _target(Xt)
+    # P5.1 lives on the default LOO path (the held-out path keeps the batched
+    # build so batch_size bounds the peak, by design since the B-memory fix).
     emu = PolyEmu(
-        X, Y, X_test=Xt, Y_test=Yt,
+        X, Y,
         init_deg_forward=2, max_degree_forward=6,
         RMSE_tol=0.0, fRMSE_tol=0.0, verbose=0,
     )

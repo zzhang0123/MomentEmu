@@ -65,6 +65,48 @@ def _check_transform_saveable(transform):
             )
 
 
+def _float32_storage_gate(emulator, gate=0.01):
+    """Per-output prediction change from casting coefficients to float32 (B7).
+
+    Compares the float32 round-trip predictions with the float64 ones on the
+    stored training data and raises when any output moves by more than ``gate``
+    times that output validation RMSE. Returns the per-output max difference
+    (or None when the training data is unavailable).
+    """
+    X = getattr(emulator, "_X_data", None)
+    Y = getattr(emulator, "_Y_data", None)
+    if X is None or not hasattr(emulator, "forward_coeffs"):
+        warnings.warn(
+            "float32=True without the training data: the D1 accuracy gate "
+            "cannot run and no per-output difference is stored.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+    ref = emulator.forward_emulator(X, extrapolation="ignore")
+    old = emulator.forward_coeffs
+    try:
+        emulator.forward_coeffs = np.asarray(old, dtype=np.float32).astype(np.float64)
+        emulator._build_forward_plan()
+        got = emulator.forward_emulator(X, extrapolation="ignore")
+    finally:
+        emulator.forward_coeffs = old
+        emulator._build_forward_plan()
+    diff = np.max(np.abs(got - ref), axis=0)
+    if Y is not None:
+        val_rmse = np.sqrt(np.mean((ref - np.asarray(Y, dtype=np.float64)) ** 2, axis=0))
+    else:
+        val_rmse = np.std(ref, axis=0)
+    bad = np.flatnonzero(diff > gate * val_rmse)
+    if bad.size:
+        raise ValueError(
+            f"float32 coefficients change a prediction by more than {gate:.0%} "
+            f"of the validation RMSE for output(s) {bad.tolist()}; keep float64 "
+            "storage."
+        )
+    return diff
+
+
 def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
     """Write a fitted PolyEmu to a versioned .npz (P4.2)."""
     from MomentEmu import __version__
@@ -95,6 +137,11 @@ def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
         "dataset_sha256": dataset_sha256,
     }
     if hasattr(emulator, "forward_coeffs"):
+        if float32:
+            diff = _float32_storage_gate(emulator)
+            if diff is not None:
+                arrays["float32_difference"] = diff
+                meta["float32_difference_checked"] = True
         arrays["forward_coeffs"] = np.asarray(emulator.forward_coeffs, dtype=coeff_dtype)
         arrays["forward_multi_indices"] = np.asarray(emulator.forward_multi_indices)
         # Hash the stored (possibly float32) coefficients so the fingerprint is
@@ -104,9 +151,21 @@ def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
         )
         if hasattr(emulator, "forward_resid_std_"):
             arrays["forward_resid_std"] = np.asarray(emulator.forward_resid_std_)
-        if hasattr(emulator, "forward_chol_"):
-            arrays["forward_chol"] = np.asarray(emulator.forward_chol_[0])
-            meta["forward_chol_lower"] = bool(emulator.forward_chol_[1])
+        _cf = getattr(emulator, "forward_chol_", None)
+        if _cf is not None:
+            arrays["forward_chol"] = np.asarray(_cf[0])
+            meta["forward_chol_lower"] = bool(_cf[1])
+        elif hasattr(emulator, "forward_moment_matrix_"):
+            arrays["forward_moment_matrix"] = np.asarray(emulator.forward_moment_matrix_)
+        _rank = getattr(emulator, "forward_rank_", None)
+        if _rank is not None:
+            meta["forward_rank"] = int(_rank)
+        _rd = getattr(emulator, "rank_difference_", None)
+        if _rd is not None:
+            arrays["rank_difference"] = np.asarray(_rd)
+        _sv = getattr(emulator, "forward_singular_values_", None)
+        if _sv is not None:
+            arrays["forward_singular_values"] = np.asarray(_sv)
     if hasattr(emulator, "backward_coeffs"):
         arrays["backward_coeffs"] = np.asarray(emulator.backward_coeffs, dtype=coeff_dtype)
         arrays["backward_multi_indices"] = np.asarray(emulator.backward_multi_indices)
@@ -122,7 +181,7 @@ def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
         arrays[f"box_{name}_hi"] = np.asarray(box.hi, dtype=np.float64)
         arrays[f"box_{name}_scale"] = np.asarray(box.scale, dtype=np.float64)
     meta["hash_"] = meta.get("forward_hash", "")
-    np.savez(path, meta=_json_bytes(meta), **arrays)  # type: ignore[arg-type]
+    np.savez(path, meta=_json_bytes(meta), **arrays)
     return str(path)
 
 
@@ -186,6 +245,19 @@ def load_emulator(path):
                 np.asarray(arrays["forward_chol"], dtype=np.float64),
                 bool(meta.get("forward_chol_lower", False)),
             )
+        elif "forward_moment_matrix" in arrays:
+            emu.forward_moment_matrix_ = np.asarray(
+                arrays["forward_moment_matrix"], dtype=np.float64
+            )
+            emu.forward_chol_ = None
+        if "forward_rank" in meta:
+            emu.forward_rank_ = int(meta["forward_rank"])
+        if "forward_singular_values" in arrays:
+            emu.forward_singular_values_ = np.asarray(arrays["forward_singular_values"])
+        if "rank_difference" in arrays:
+            emu.rank_difference_ = np.asarray(arrays["rank_difference"])
+        if "float32_difference" in arrays:
+            emu.float32_difference_ = np.asarray(arrays["float32_difference"])
         if "forward_hash" in meta:
             got = coefficient_fingerprint(
                 emu.forward_coeffs, emu.forward_multi_indices, emu.transform

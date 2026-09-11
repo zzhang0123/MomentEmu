@@ -28,7 +28,7 @@ def _ishigami_exact(a=7.0, b=0.1):
 def test_polynomial_sobol_is_exact():
     # f = x0^2 + x1 on the exact [-1, 1]^2 box; Var(x0^2) = 4/45, Var(x1) = 1/3.
     rng = np.random.default_rng(7)
-    n = 4000
+    n = 20000
     X = np.vstack([np.array(list(product([-1.0, 1.0], repeat=2))), rng.uniform(-1, 1, (n, 2))])
     Y = X[:, 0:1] ** 2 + X[:, 1:2]
     emu = PolyEmu(X, Y, init_deg_forward=2, max_degree_forward=2, RMSE_tol=0.0, verbose=0)
@@ -36,7 +36,11 @@ def test_polynomial_sobol_is_exact():
     total = 4.0 / 45.0 + 1.0 / 3.0
     np.testing.assert_allclose(r["S1"][:, 0], [4.0 / 45.0 / total, 1.0 / 3.0 / total], atol=1e-10)
     np.testing.assert_allclose(r["ST"][:, 0], r["S1"][:, 0], atol=1e-10)
-    assert abs(r["shares_sum"][0] - 1.0) < 1e-10
+    # shares_sum is the fraction of Var(Y) the Legendre decomposition explains;
+    # compare it with the model R^2 on the same rows (it is no longer a tautology).
+    pred = emu.forward_emulator(X, extrapolation="ignore")
+    r2 = 1.0 - float(np.mean((pred - Y) ** 2)) / float(np.var(Y))
+    assert abs(float(r["shares_sum"][0]) - r2) < 0.01 * abs(r2)
 
 
 @pytest.mark.slow

@@ -1,6 +1,6 @@
 """One memory measurement in a fresh process: peak RSS and tracemalloc peak of a fit.
 
-Usage: python -m bench.memcell N batch_size dim_reduction  ->  prints one JSON line.
+Usage: python -m benchmarks.memcell N batch_size dim_reduction  ->  prints one JSON line.
 batch_size 'none' maps to the constructor default (None).
 """
 from __future__ import annotations

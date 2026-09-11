@@ -42,7 +42,13 @@ shared monomial plan. It is a breaking release.
 - cross_validation, dim_reduction, per_mode_thres.
 - predictive_mse_aic_bic -> predictive_rmse_aic_bic (the function has always
   returned the RMSE).
-- The positional PolyEmu(X, Y, ...) constructor -> fit/predict (P4.1).
+
+### Deferred
+
+- The positional PolyEmu(X, Y, ...) constructor remains the supported 2.0.0
+  path. The data-less constructor and the runtime deprecation warning are not
+  implemented (the fit/predict split is available); planned for a later
+  release, not 2.0.0. Candidates review B-item "unimplemented but advertised".
 
 ### Added
 

@@ -50,3 +50,11 @@ autodiff = ["jax", "jaxlib", "torch"]
 all = ["jax", "jaxlib", "torch", "matplotlib"]
 docs = ["mkdocs", "mkdocs-material", "mkdocstrings[python]", "pymdown-extensions"]
 dev = ["pytest", "pytest-cov", "black", "isort", "flake8", "mypy", "pre-commit"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--import-mode=importlib -p no:cacheprovider"
+markers = [
+    "slow: takes more than ~5 s; deselect with -m 'not slow'",
+    "backend(name): requires the optional jax/torch extra",
+]

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from MomentEmu.MomentEmu import PolyEmu
+from MomentEmu.PolyEmu import PolyEmu
 from MomentEmu import torch_momentemu, jax_momentemu, symbolic_momentemu
 
 # Check for optional dependencies

@@ -1076,6 +1076,74 @@ class PolyEmu():
             J = J * np.exp(Y_affine)[:, :, None]
         return J[0] if single else J
 
+    def validate(self, X_val, Y_val, sigma=None, cov=None, *, extrapolation="warn"):
+        """Error metrics in units of the user data covariance (P3.1, D10).
+
+        Exactly one of ``sigma`` (per-entry standard deviations, shape (m,) or
+        (N, m)) or ``cov`` (shape (m, m) shared, or (N, m, m) per point) is
+        required: there is no neutral default covariance. Returns median and
+        p99 Delta-chi2 = r^T C^-1 r, the per-output RMS error in sigma, and the
+        maximum |r| / sigma.
+        """
+        if sigma is None and cov is None:
+            raise ValueError(
+                "validate requires sigma or cov (D10): there is no neutral "
+                "default covariance for a polynomial residual."
+            )
+        if sigma is not None and cov is not None:
+            raise ValueError("give either sigma or cov, not both")
+        X_val = np.asarray(X_val, dtype=np.float64)
+        Y_val = np.asarray(Y_val, dtype=np.float64)
+        if Y_val.ndim != 2:
+            raise ValueError(f"Y_val must be 2-D, got shape {Y_val.shape}")
+        pred = self.forward_emulator(X_val, extrapolation=extrapolation)
+        r = pred - Y_val
+        N, m = r.shape
+        if cov is not None:
+            cov = np.asarray(cov, dtype=np.float64)
+            from scipy.linalg import solve_triangular
+
+            if cov.ndim == 2:
+                L = np.linalg.cholesky(cov)
+                z = solve_triangular(L, r.T, lower=True, check_finite=False)
+                dchi2 = np.einsum("ij,ij->j", z, z)
+                sigma_eff = np.sqrt(np.diag(cov))[None, :] * np.ones((N, 1))
+            elif cov.ndim == 3:
+                L = np.linalg.cholesky(cov)
+                z = np.linalg.solve(L, r[:, :, None])[:, :, 0]
+                dchi2 = np.sum(z ** 2, axis=1)
+                sigma_eff = np.sqrt(np.diagonal(cov, axis1=1, axis2=2))
+            else:
+                raise ValueError(f"cov must be (m, m) or (N, m, m), got {cov.shape}")
+        else:
+            sigma = np.asarray(sigma, dtype=np.float64)
+            if sigma.ndim == 0:
+                sigma_eff = np.full((N, m), float(sigma))
+            elif sigma.ndim == 1:
+                sigma_eff = np.broadcast_to(sigma[None, :], (N, m))
+            elif sigma.ndim == 2:
+                sigma_eff = sigma
+            else:
+                raise ValueError(f"sigma must be scalar, (m,) or (N, m), got {sigma.shape}")
+            dchi2 = np.sum((r / sigma_eff) ** 2, axis=1)
+        if np.any(sigma_eff <= 0):
+            raise ValueError("sigma (or the diagonal of cov) must be positive")
+        rms_over_sigma = np.sqrt(np.mean((r / sigma_eff) ** 2, axis=0))
+        result = {
+            "n": int(N),
+            "m": int(m),
+            "dchi2_median": float(np.median(dchi2)),
+            "dchi2_p99": float(np.percentile(dchi2, 99)),
+            "rms_over_sigma": rms_over_sigma,
+            "max_abs_over_sigma": float(np.max(np.abs(r / sigma_eff))),
+        }
+        logger.info(
+            "validate: n=%d median Delta-chi2=%.4g p99=%.4g max|r|/sigma=%.4g",
+            result["n"], result["dchi2_median"], result["dchi2_p99"],
+            result["max_abs_over_sigma"],
+        )
+        return result
+
     def _check_box(self, X, box: DomainBox, extrapolation: str, label: str) -> None:
         if extrapolation not in ("warn", "raise", "ignore"):
             raise ValueError(
@@ -1120,7 +1188,11 @@ class PolyEmu():
         X, _single = resolve_batch_shape(X, self.n_params)
         # D1: predict in float64 even when the caller passes int/float32.
         X = np.asarray(X, dtype=np.float64)
-        self._check_box(X, self.X_box_, extrapolation, "input")
+        if hasattr(self, "X_box_"):
+            self._check_box(X, self.X_box_, extrapolation, "input")
+        # Pickles from before 2.0 lack the cached inverses and the plan.
+        if not hasattr(self, "_inv_scale_X"):
+            self._inv_scale_X = 1.0 / self.scaler_X.scale_
         if getattr(self, "forward_plan", None) is None:
             self._build_forward_plan()
         X_scaled = (X - self.scaler_X.mean_) * self._inv_scale_X
@@ -1361,7 +1433,11 @@ class PolyEmu():
         check_finite(Y, "Y")
         Yshape = Y.shape
         Y, _single = resolve_batch_shape(Y, self.n_outputs)
-        self._check_box(Y, self.Y_box_, extrapolation, "output")
+        if hasattr(self, "Y_box_"):
+            self._check_box(Y, self.Y_box_, extrapolation, "output")
+        if not hasattr(self, "_inv_scale_Y"):
+            _s = self.scaler_Y.scale_
+            self._inv_scale_Y = 1.0 / (_s if _s is not None else np.ones(self.n_outputs))
         if self.log_Y:
             check_log_domain(Y, "Y")
             Y = np.log(Y)

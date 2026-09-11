@@ -5,11 +5,7 @@ from itertools import combinations_with_replacement
 from collections import Counter
 
 import numpy as np
-import sympy as sp
 from logging import warning
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
 from MomentEmu.guards import (
     COND_RAISE,
     IllConditionedError,
@@ -239,6 +235,8 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
     multi_indices: list of α
     Returns: list of sympy expressions, one per output dimension
     """
+    import sympy as sp
+
     D, m = coeffs.shape
     n = len(multi_indices[0])
     if variable_names is None:
@@ -475,6 +473,11 @@ class PolyEmu():
         parameter calibration and the meaning of each dict key.
         """
         
+        # Imported here, not at module scope, so `import MomentEmu` and the
+        # numpy-only inference path do not pay for sklearn (P0.9).
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
         self.standardize_Y_with_std = standardize_Y_with_std

@@ -11,11 +11,17 @@ Also registers the slow and backend markers used by the suite.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# The suite asserts the import path itself below, so silence the runtime
+# stale-flat-file warning that P0.9 emits for a machine carrying the old
+# single-file install (e.g. the base conda env).
+os.environ.setdefault("MOMENTEMU_IGNORE_STALE", "1")
 
 
 def _find_src(start: Path) -> Path:

@@ -314,50 +314,48 @@ def compute_moments_vector_output(X, Y, multi_indices):
 
     return Mm, nu
 
-def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000):
-    """
-    Memory-efficient version of moment computation using batched processing.
+def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000, weights=None):
+    """Batched moment build on the P0.7 plan, with optional sample weights (P5.2, P5.6).
 
     Args:
         X: N x n input parameter array
         Y: N x m observable array
-        multi_indices: list of multi-indices
-        batch_size: number of samples to process at once
+        multi_indices: basis multi-indices
+        batch_size: number of samples per batch
+        weights: optional per-sample weights (N,), normalised to mean 1; None
+            reproduces the unweighted moments bit for bit.
 
-    Returns:
-        Mm: moment matrix (D x D)
-        nu: moment vectors (D x m)
+    Returns: (Mm (D, D), nu (D, m)).
     """
     N, n = X.shape
     m = Y.shape[1]
     D = len(multi_indices)
-
-    # Initialize accumulators
     Mm = np.zeros((D, D), dtype=X.dtype)
     nu = np.zeros((D, m), dtype=X.dtype)
-
-    # Process data in batches
+    w = None
+    if weights is not None:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if w.shape[0] != N:
+            raise ValueError(f"weights has {w.shape[0]} entries, expected {N}")
+        if np.any(w < 0):
+            raise ValueError("weights must be non-negative")
+        w = w / w.mean()
+    # One level-wise recursive plan for all batches (P0.7/P5.2).
+    plan = MonomialPlan.build(multi_indices)
     for start_idx in range(0, N, batch_size):
         end_idx = min(start_idx + batch_size, N)
-
-        # Evaluate monomials for this batch
         X_batch = X[start_idx:end_idx]
         Y_batch = Y[start_idx:end_idx]
-        Phi_batch = evaluate_monomials_lazy(X_batch, multi_indices)  # batch_size x D
-
-        # Accumulate moment matrix: M += Phi_batch.T @ Phi_batch
-        Mm += Phi_batch.T @ Phi_batch
-
-        # Accumulate moment vector: nu += Phi_batch.T @ Y_batch
-        nu += Phi_batch.T @ Y_batch
-
-        # Clear batch from memory
-        del Phi_batch, X_batch, Y_batch
-
-    # Normalize by total number of samples
+        Phi_batch = plan.evaluate(X_batch)  # (batch, D)
+        if w is None:
+            Mm += Phi_batch.T @ Phi_batch
+            nu += Phi_batch.T @ Y_batch
+        else:
+            w_batch = w[start_idx:end_idx]
+            Mm += (Phi_batch.T * w_batch) @ Phi_batch
+            nu += (Phi_batch.T * w_batch) @ Y_batch
     Mm /= N
     nu /= N
-
     return Mm, nu
 
 def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
@@ -627,7 +625,8 @@ class PolyEmu:
                 batch_size=None,
                 random_state=None,
                 verbose=0,
-                transform=None):
+                transform=None,
+                weights=None):
         """
         Polynomial emulator class for both forward and backward emulation.
         X: N x n array of input parameters. N is the number of samples, n is the number of parameters.
@@ -708,6 +707,7 @@ class PolyEmu:
             random_state=random_state,
             verbose=verbose,
             transform=transform,
+            weights=weights,
         )
 
         # Imported here, not at module scope, so `import MomentEmu` and the
@@ -863,6 +863,7 @@ class PolyEmu:
                 per_mode_thres=per_mode_thres,
                 batch_size=batch_size,
                 loo=use_loo,
+                weights=weights,
             )
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
@@ -934,7 +935,8 @@ class PolyEmu:
                                             dim_reduction=dim_reduction,
                                             per_mode_thres=per_mode_thres,
                                             batch_size=batch_size,
-                                            loo=use_loo)
+                                            loo=use_loo,
+                                            weights=weights)
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
                 X_val_unscaled, Y_val_unscaled = _unscale_val(
@@ -959,7 +961,8 @@ class PolyEmu:
                                   dim_reduction=False,
                                   per_mode_thres=None,
                                   batch_size=10000,
-                                  loo=False):
+                                  loo=False,
+                                  weights=None):
         """Fit the forward degree sweep (internal; normally called by the constructor)."""
 
         if init_deg is None:
@@ -1062,10 +1065,12 @@ class PolyEmu:
                 # the LOO-RMSE, so selection is uniform.
                 _plan = MonomialPlan.build(multi_indices)
                 Phi = _plan.evaluate(X_train_scaled)
-                M = Phi.T @ Phi / X_train_scaled.shape[0]
-                nu = Phi.T @ Y_train_scaled / X_train_scaled.shape[0]
+                M, nu = generate_moment_products(
+                    Phi, Y_train_scaled, weights=weights
+                )
                 coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
-                    M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d
+                    M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d,
+                    weights=weights,
                 )
                 if not np.isfinite(coeffs).all():
                     stop_reason = "Cholesky failed"
@@ -1078,7 +1083,8 @@ class PolyEmu:
                 metric = loo_rmse
             else:
                 M, nu = compute_moments_vector_output_batched(
-                    X_train_scaled, Y_train_scaled, multi_indices, batch_size=batch_size
+                    X_train_scaled, Y_train_scaled, multi_indices,
+                    batch_size=batch_size, weights=weights,
                 )
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
@@ -1605,7 +1611,8 @@ class PolyEmu:
                                    dim_reduction=False,
                                    per_mode_thres=None,
                                    batch_size=10000,
-                                   loo=False):
+                                   loo=False,
+                                   weights=None):
         """Fit the backward degree sweep (internal; normally called by the constructor)."""
         if init_deg is None:
             if self.n_outputs > 6:
@@ -1700,10 +1707,12 @@ class PolyEmu:
             if loo:
                 _plan = MonomialPlan.build(multi_indices)
                 Phi = _plan.evaluate(Y_train_scaled)
-                M = Phi.T @ Phi / Y_train_scaled.shape[0]
-                nu = Phi.T @ X_train_scaled / Y_train_scaled.shape[0]
+                M, nu = generate_moment_products(
+                    Phi, X_train_scaled, weights=weights
+                )
                 coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
-                    M, nu, Phi, X_train_scaled, on_singular="warn", degree=d
+                    M, nu, Phi, X_train_scaled, on_singular="warn", degree=d,
+                    weights=weights,
                 )
                 if not np.isfinite(coeffs).all():
                     stop_reason = "Cholesky failed"
@@ -1716,7 +1725,8 @@ class PolyEmu:
                 metric = loo_rmse
             else:
                 M, nu = compute_moments_vector_output_batched(
-                    Y_train_scaled, X_train_scaled, multi_indices, batch_size=batch_size
+                    Y_train_scaled, X_train_scaled, multi_indices,
+                    batch_size=batch_size, weights=weights,
                 )
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True

@@ -399,7 +399,6 @@ def test_unconditional_stdout_no_verbosity_flag(capsys):
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.xfail(strict=True, reason="P5.6 sample weights")
 def test_no_sample_weighting():
     import inspect
 

@@ -17,20 +17,32 @@ from MomentEmu.guards import (
 
 ####### Moment vector and matrix #################
 
-def generate_moment_products(Phi, Y):
+def generate_moment_products(Phi, Y, weights=None):
     """Generate moment products from evaluated basis functions Phi.
 
     Args:
-        Phi: evaluated basis functions (N x D), where N is the number of samples and D is the number of basis functions.
-        Y: data matrix (N x m), where m is the number of output variables.
+        Phi: evaluated basis functions (N x D).
+        Y: data matrix (N x m).
+        weights: optional per-sample weights (N,), normalised to mean 1;
+            None reproduces the unweighted moments bit for bit (P5.6).
 
     Returns:
         M: moment matrix (D x D)
         nu: moment vector (D x m)
     """
     N, D = Phi.shape
-    M = (Phi.T @ Phi) / N                       # D x D
-    nu = (Phi.T @ Y) / N                       # D x m
+    if weights is None:
+        M = (Phi.T @ Phi) / N                       # D x D
+        nu = (Phi.T @ Y) / N                       # D x m
+        return M, nu
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if w.shape[0] != N:
+        raise ValueError(f"weights has {w.shape[0]} entries, expected {N}")
+    if np.any(w < 0):
+        raise ValueError("weights must be non-negative")
+    w = w / w.mean()
+    M = (Phi.T * w) @ Phi / N                   # D x D
+    nu = (Phi.T * w) @ Y / N                    # D x m
     return M, nu
 
 def solve_emulator_coefficients(
@@ -114,6 +126,7 @@ def press_loo(
     warn_at: float = COND_WARN,
     raise_at: float = COND_RAISE,
     degree: int | None = None,
+    weights=None,
 ):
     """Fit and evaluate leave-one-out PRESS from one Cholesky factor (P1.5).
 
@@ -158,8 +171,17 @@ def press_loo(
     check_coefficients_finite(coeffs, degree=degree)
     # A = U^{-T} Phi^T  (each column is U^{-T} Phi_i).
     A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
-    h = np.einsum("ij,ij->j", A, A) / N
+    if weights is None:
+        h = np.einsum("ij,ij->j", A, A) / N
+        w_col = None
+    else:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)
+        w = w / w.mean()
+        h = w * np.einsum("ij,ij->j", A, A) / N
+        w_col = w
     res = Y - Phi @ coeffs
+    if w_col is not None:
+        res = res * w_col[:, None]
     denom = 1.0 - h
     if np.any(denom <= 0):
         warnings.warn(

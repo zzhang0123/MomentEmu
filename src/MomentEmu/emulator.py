@@ -687,6 +687,29 @@ class PolyEmu:
         parameter calibration and the meaning of each dict key.
         """
 
+        # Hyper-parameters kept so fit() can refit with the same settings (P4.1).
+        self._hyperparameters = dict(
+            log_Y=log_Y,
+            cross_validation=cross_validation,
+            test_size=test_size,
+            RMSE_tol=RMSE_tol,
+            fRMSE_tol=fRMSE_tol,
+            forward=forward,
+            backward=backward,
+            init_deg_forward=init_deg_forward,
+            init_deg_backward=init_deg_backward,
+            max_degree_forward=max_degree_forward,
+            max_degree_backward=max_degree_backward,
+            dim_reduction=dim_reduction,
+            per_mode_thres=per_mode_thres,
+            return_max_frac_err=return_max_frac_err,
+            standardize_Y_with_std=standardize_Y_with_std,
+            batch_size=batch_size,
+            random_state=random_state,
+            verbose=verbose,
+            transform=transform,
+        )
+
         # Imported here, not at module scope, so `import MomentEmu` and the
         # numpy-only inference path do not pay for sklearn (P0.9).
         from sklearn.preprocessing import StandardScaler
@@ -720,6 +743,8 @@ class PolyEmu:
             check_finite(X_test, "X_test")
             check_finite(Y_test, "Y_test")
         check_design_columns(X)
+        self._X_data = X
+        self._Y_data = Y
 
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
@@ -1452,6 +1477,38 @@ class PolyEmu:
         from MomentEmu.io import fingerprint
 
         return fingerprint(self)
+
+    def fit(self, X, Y, X_val=None, Y_val=None, **kwargs):
+        """(Re)fit this emulator from data (P4.1).
+
+        The constructor keyword arguments are reused and any keyword here
+        overrides them; X_val/Y_val map to X_test/Y_test. Returns self.
+        """
+        merged = dict(getattr(self, '_hyperparameters', {}))
+        merged.update(kwargs)
+        if X_val is not None and 'X_test' not in merged:
+            merged['X_test'] = X_val
+        if Y_val is not None and 'Y_test' not in merged:
+            merged['Y_test'] = Y_val
+        type(self).__init__(self, X, Y, **merged)
+        return self
+
+    def predict(self, X, **kwargs):
+        """Alias for forward_emulator (P4.1)."""
+        return self.forward_emulator(X, **kwargs)
+
+    def fit_inverse(self, **kwargs):
+        """Fit the backward map on the data already supplied (P4.1)."""
+        merged = dict(getattr(self, '_hyperparameters', {}))
+        merged.update(kwargs)
+        merged['forward'] = True
+        merged['backward'] = True
+        type(self).__init__(self, self._X_data, self._Y_data, **merged)
+        return self
+
+    def predict_inverse(self, Y, **kwargs):
+        """Alias for backward_emulator (P4.1)."""
+        return self.backward_emulator(Y, **kwargs)
 
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""

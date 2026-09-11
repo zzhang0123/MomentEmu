@@ -140,3 +140,29 @@ def test_jax_value_and_grad_matches_jacobian():
     for j in range(emu.n_outputs):
         g = jax.grad(lambda v: f.evaluate(v)[j])(x)
         np.testing.assert_allclose(np.asarray(g), J[j], rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.backend
+def test_jax_derivative_helpers_use_the_jitted_path(monkeypatch):
+    """P2.1: value_and_grad/jacobian/hessian must not differentiate the
+    un-jitted Python evaluator (referee 2026-09-12: 21-25 ms per call).
+    After the first compile, monkeypatching evaluate must not be hit."""
+    emu = _fit(seed=11)
+    f = create_jax_emulator(emu)
+    x = jnp.asarray(emu.scaler_X.mean_)
+    f.value_and_grad(x)
+    f.jacobian(x)
+    f.hessian(x)
+    calls = []
+    original = JaxEmulator.evaluate
+
+    def spy(self, X):
+        calls.append(1)
+        return original(self, X)
+
+    monkeypatch.setattr(JaxEmulator, "evaluate", spy)
+    f.value_and_grad(x)
+    f.jacobian(x)
+    f.hessian(x)
+    assert calls == []
+

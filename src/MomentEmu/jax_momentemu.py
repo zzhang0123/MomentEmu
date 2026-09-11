@@ -24,7 +24,17 @@ def _evaluate_impl(emulator, X):
     return emulator.evaluate(X)
 
 
+def _value_impl(emulator, X):
+    return emulator.evaluate(X).sum()
+
+
 _JITTED_EVALUATE = jax.jit(_evaluate_impl)
+# help(P2.1): the value/grad/jacobian/hessian helpers must differentiate the
+# traced evaluator, not the un-jitted Python one. Differentiating the un-jitted
+# `evaluate` costs ~20 ms per call instead of ~0.1 ms (referee 2026-09-12).
+_JITTED_VALUE_AND_GRAD = jax.jit(jax.value_and_grad(_value_impl, argnums=1))
+_JITTED_JACFWD = jax.jit(jax.jacfwd(_evaluate_impl, argnums=1))
+_JITTED_HESSIAN = jax.jit(jax.hessian(_value_impl, argnums=1))
 
 
 @dataclass(frozen=True)
@@ -128,14 +138,18 @@ class JaxEmulator:
         return _JITTED_EVALUATE(self, X)
 
     def value_and_grad(self, X, *, sum_outputs=True):
-        f = (lambda x: self.evaluate(x).sum()) if sum_outputs else self.evaluate
-        return jax.value_and_grad(f)(X)
+        """Jitted (value, gradient); sum_outputs=False returns (value, jacobian)."""
+        if sum_outputs:
+            return _JITTED_VALUE_AND_GRAD(self, X)
+        return _JITTED_EVALUATE(self, X), _JITTED_JACFWD(self, X)
 
     def jacobian(self, X):
-        return jax.jacfwd(self.evaluate)(X)
+        """Jitted Jacobian of the jitted evaluator."""
+        return _JITTED_JACFWD(self, X)
 
     def hessian(self, X):
-        return jax.hessian(lambda x: self.evaluate(x).sum())(X)
+        """Jitted Hessian of the summed output."""
+        return _JITTED_HESSIAN(self, X)
 
     @classmethod
     def from_polyemu(cls, emulator, *, direction="forward", dtype=None):

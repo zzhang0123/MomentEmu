@@ -148,8 +148,10 @@ class MonomialPlan:
         xT = np.ascontiguousarray(X.T)
         for level in self.levels:
             buf[level] = buf[self.parent[level]] * xT[self.var[level]]
-        # buf is (D_closure, N): return the (N, D) transpose the caller uses.
-        return np.ascontiguousarray(buf[self.select].T)
+        # buf is (D_closure, N): return the (N, D) view the caller uses. The
+        # transpose of the C-contiguous selection is F-contiguous, which BLAS
+        # consumes directly; forcing a copy cost ~0.18 s per sweep (2026-09-12).
+        return buf[self.select].T
 
     def evaluate_derivatives(self, X_scaled: np.ndarray) -> np.ndarray:
         """Return (n, N, D) dPhi/dz over the requested rows (P2.2).

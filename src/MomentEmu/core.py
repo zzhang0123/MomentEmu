@@ -41,6 +41,10 @@ def generate_moment_products(Phi, Y, weights=None):
     if np.any(w < 0):
         raise ValueError("weights must be non-negative")
     w = w / w.mean()
+    if np.all(w == 1.0):
+        # P5.6: uniform weights must reproduce the unweighted moments bit for
+        # bit; the (Phi.T * w) temporary does not guarantee that, so short-cut.
+        return (Phi.T @ Phi) / N, (Phi.T @ Y) / N
     M = (Phi.T * w) @ Phi / N                   # D x D
     nu = (Phi.T * w) @ Y / N                    # D x m
     return M, nu
@@ -251,6 +255,8 @@ def press_loo(
     else:
         w = np.asarray(weights, dtype=np.float64).reshape(-1)
         w_col = w / w.mean()
+        if np.all(w_col == 1.0):
+            w_col = None  # P5.6: uniform weights == unweighted, bit for bit
     denom_bad = False
     h_max = 0.0
     press = np.zeros(nu.shape[1], dtype=np.float64)

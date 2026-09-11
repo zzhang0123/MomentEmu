@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from collections import Counter
 from itertools import combinations_with_replacement
@@ -57,7 +58,10 @@ DEFAULT_BATCH_SIZE = 10000
 
 # B-memory: the LOO path keeps the full Phi resident only when it fits this
 # budget; above it the batched bordered build bounds the peak by batch_size.
-PHI_BUDGET_BYTES = 512 * 1024 ** 2
+# Set MOMENTEMU_PHI_BUDGET_BYTES=0 to force the strict batched path everywhere.
+PHI_BUDGET_BYTES = int(
+    os.environ.get("MOMENTEMU_PHI_BUDGET_BYTES", 512 * 1024 ** 2)
+)
 
 logger = logging.getLogger("MomentEmu")
 logger.addHandler(logging.NullHandler())
@@ -350,6 +354,8 @@ def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000,
         if np.any(w < 0):
             raise ValueError("weights must be non-negative")
         w = w / w.mean()
+        if np.all(w == 1.0):
+            w = None  # P5.6: uniform weights == unweighted, bit for bit
     # One level-wise recursive plan for all batches (P0.7/P5.2).
     plan = MonomialPlan.build(multi_indices)
     for start_idx in range(0, N, batch_size):
@@ -1121,6 +1127,8 @@ class PolyEmu:
             if np.any(_w_norm < 0):
                 raise ValueError("weights must be non-negative")
             _w_norm = _w_norm / _w_norm.mean()
+            if np.all(_w_norm == 1.0):
+                _w_norm = None  # P5.6: uniform weights == unweighted, bit for bit
         _inc: dict[str, Any] = {
             "indices": None,
             "phi": None,

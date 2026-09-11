@@ -453,7 +453,6 @@ def test_license_missing_mit_attribution_clause():
     assert "shall be included in all copies" in Path("LICENSE").read_text()
 
 
-@pytest.mark.xfail(strict=True, reason="P4.6 README")
 def test_readme_jax_example_import_broken():
     from pathlib import Path
 

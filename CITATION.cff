@@ -6,7 +6,7 @@ abstract: >-
   exposes them with millisecond inference, symbolic export and JAX/PyTorch
   autodiff.
 version: 2.0.0
-date-released: 2026-02-05
+date-released: 2026-09-11
 authors:
   - family-names: Zhang
     given-names: Zheng

@@ -4,7 +4,7 @@ All notable changes to MomentEmu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-02-05
+## [2.0.0] - 2026-09-11
 
 This release makes the package importable from the repository, fixes several
 wrong-fit and wrong-backend paths, and rebuilds the autodiff backends on a

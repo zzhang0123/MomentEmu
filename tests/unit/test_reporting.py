@@ -16,14 +16,14 @@ def _data(seed=0, n=3, N=400, scale=1.0):
 
 def test_verbose_zero_writes_nothing(capsys):
     X, Y = _data()
-    PolyEmu(X, Y, cross_validation=False, max_degree_forward=3, verbose=0)
+    PolyEmu(X, Y, max_degree_forward=3, verbose=0)
     captured = capsys.readouterr()
     assert captured.out == ""
 
 
 def test_verbose_one_logs_to_stderr(capsys):
     X, Y = _data()
-    PolyEmu(X, Y, cross_validation=False, max_degree_forward=2, verbose=1)
+    PolyEmu(X, Y, max_degree_forward=2, verbose=1)
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "forward emulator" in captured.err.lower()
@@ -31,7 +31,7 @@ def test_verbose_one_logs_to_stderr(capsys):
 
 def test_forward_degree_and_deprecated_alias():
     X, Y = _data()
-    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=4, verbose=0)
+    emu = PolyEmu(X, Y, max_degree_forward=4, verbose=0)
     assert emu.forward_degree in emu.forward_degree_list
     with pytest.warns(DeprecationWarning, match="foward_degree"):
         alias = emu.foward_degree
@@ -41,7 +41,7 @@ def test_forward_degree_and_deprecated_alias():
 def test_rmse_tol_is_scale_free_with_std_false():
     X, Y = _data(seed=1)
     common = dict(
-        cross_validation=False,
+
         standardize_Y_with_std=False,
         RMSE_tol=1e-4,
         max_degree_forward=5,
@@ -60,6 +60,6 @@ def test_per_output_validation_rmse_shape():
         np.sin(X[:, 1]),
         X[:, 2] ** 3,
     ])
-    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=4, verbose=0)
+    emu = PolyEmu(X, Y, max_degree_forward=4, verbose=0)
     assert emu.forward_RMSE_per_output_.shape == (3,)
     assert np.all(np.isfinite(emu.forward_RMSE_per_output_))

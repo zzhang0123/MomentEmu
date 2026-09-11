@@ -104,6 +104,78 @@ def solve_emulator_coefficients(
         return coeffs, rep.cond
     return coeffs  # D x m
 
+
+def press_loo(
+    M,
+    nu,
+    Phi,
+    Y,
+    *,
+    on_singular: str = "warn",
+    warn_at: float = COND_WARN,
+    raise_at: float = COND_RAISE,
+    degree: int | None = None,
+):
+    """Fit and evaluate leave-one-out PRESS from one Cholesky factor (P1.5).
+
+    With M = Phi^T Phi / N and Cholesky M = U^T U, the leverage of training
+    row i is h_i = ||U^{-T} Phi_i||^2 / N = colsum(solve_triangular(U,
+    Phi^T, trans="T")^2) / N.  Then PRESS_j = sum_i (r_ij / (1 - h_i))^2,
+    which is the exact leave-one-out squared error (verified against
+    brute-force refits to 3e-14 in the review).
+
+    Returns (coeffs, cond, loo_rmse, loo_rmse_per_output, leverage_max).
+    loo_rmse is sqrt(mean_j PRESS_j / N), the scalar used to select the degree.
+    """
+    from scipy.linalg import cho_factor, cho_solve, solve_triangular
+
+    M = np.asarray(M, dtype=np.float64)
+    nu = np.asarray(nu, dtype=np.float64)
+    Phi = np.asarray(Phi, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    N = Phi.shape[0]
+    rep = check_conditioning(
+        M,
+        warn_at=warn_at,
+        raise_at=raise_at,
+        on_singular=on_singular,
+        degree=degree,
+        method="auto",
+    )
+    try:
+        cf, lower = cho_factor(M, lower=False, check_finite=False)
+    except np.linalg.LinAlgError as exc:
+        msg = (
+            f"Cholesky factorisation of the {M.shape[0]}x{M.shape[1]} moment "
+            f"matrix failed: M is not positive definite; the LOO leverage is "
+            f"undefined."
+        )
+        if on_singular == "raise":
+            raise IllConditionedError(msg) from exc
+        warnings.warn(msg, IllConditionedWarning, stacklevel=2)
+        nan = float("nan")
+        return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
+    coeffs = cho_solve((cf, lower), nu, check_finite=False)
+    check_coefficients_finite(coeffs, degree=degree)
+    # A = U^{-T} Phi^T  (each column is U^{-T} Phi_i).
+    A = solve_triangular(cf, Phi.T, lower=lower, trans="T", check_finite=False)
+    h = np.einsum("ij,ij->j", A, A) / N
+    res = Y - Phi @ coeffs
+    denom = 1.0 - h
+    if np.any(denom <= 0):
+        warnings.warn(
+            f"degree {degree}: leave-one-out leverage reached 1 "
+            f"(max {float(h.max()):.6g}); the LOO error is undefined for those rows.",
+            IllConditionedWarning,
+            stacklevel=2,
+        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        press = np.sum((res / denom[:, None]) ** 2, axis=0)
+    loo_per_output = np.sqrt(press / N)
+    loo_rmse = float(np.sqrt(np.mean(press) / N))
+    return coeffs, rep.cond, loo_rmse, loo_per_output, float(h.max())
+
+
 def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
     """
     Filter out modes with tiny contributions.
@@ -171,27 +243,9 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
     
 
 ####### Metrics, cost and penalties ##############
-def metrics_and_penalties(RMSE, n, k):
-    """
-    Calculate AIC, AICc, and BIC. 
-    Interpretation: Those are metrics defined with penalty on high dimensional representations. The lower the better.
-    AIC: Akaike Information Criterion
-    AICc: Corrected AIC (when n is not large when compared with k)
-    BIC: Bayesian Information Criterion
-    
-    Args:
-        RMSE: root mean squared error
-        n: number of samples
-        k: number of parameters
-        
-    Returns: AIC, AICc, BIC
-    """
-
-    AIC = 2 * (n * np.log(RMSE) + k)
-    AICc = AIC + (2 * k * (k + 1)) / (n - k - 1)
-    BIC = 2 * n * np.log(RMSE) + k * np.log(n)
-
-    return AIC, AICc, BIC
+# metrics_and_penalties (AIC/AICc/BIC) was removed in 2.0.0: it mixed train and
+# held-out quantities and AIC/BIC picked the maximum degree on non-polynomial
+# targets. Selection uses LOO-RMSE (P1.5) or a held-out RMSE.
 
 
 def predictive_mse_aic_bic(y_test, y_pred, k, n_train=None):

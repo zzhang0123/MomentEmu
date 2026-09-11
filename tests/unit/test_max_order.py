@@ -54,7 +54,7 @@ def test_explicit_degree_with_D_ge_N_raises():
     X = rng.uniform(-1.0, 1.0, (150, 4))
     Y = (X[:, 0] ** 2 + X[:, 1]).reshape(-1, 1)
     with pytest.raises(ValueError) as excinfo:
-        PolyEmu(X, Y, cross_validation=False, max_degree_forward=6)
+        PolyEmu(X, Y, max_degree_forward=6)
     msg = str(excinfo.value)
     assert "210" in msg  # basis_size(4, 6)
     assert "150" in msg  # N_train
@@ -65,7 +65,7 @@ def test_auto_cap_warns_and_stays_identifiable():
     X = rng.uniform(-1.0, 1.0, (300, 3))
     Y = (X[:, 0] ** 2 + X[:, 1]).reshape(-1, 1)
     with pytest.warns(UserWarning, match="auto-capped max_degree_forward"):
-        emu = PolyEmu(X, Y, cross_validation=False)
+        emu = PolyEmu(X, Y)
     D = emu.forward_multi_indices.shape[0]
     assert D * 2 <= X.shape[0]
     assert D < X.shape[0]
@@ -80,7 +80,7 @@ def test_backward_cap_below_init_raises():
     # D = 2001 with a 2x margin, so the backward sweep cannot start.
     assert max_supported_degree(m, N, fill=2.0) == 0
     with pytest.raises(ValueError, match="init_deg_backward"):
-        PolyEmu(X, Y, forward=False, backward=True, cross_validation=False)
+        PolyEmu(X, Y, forward=False, backward=True)
 
 
 def test_backward_fit_stays_under_half_N():
@@ -88,6 +88,6 @@ def test_backward_fit_stays_under_half_N():
     N, m = 4000, 12
     X = rng.uniform(-1.0, 1.0, (N, 1))
     Y = rng.uniform(0.0, 1.0, (N, m))
-    emu = PolyEmu(X, Y, forward=False, backward=True, cross_validation=False)
+    emu = PolyEmu(X, Y, forward=False, backward=True)
     D = emu.backward_multi_indices.shape[0]
     assert D * 2 <= N

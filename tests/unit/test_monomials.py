@@ -68,7 +68,7 @@ def _fit(seed: int, **kw) -> PolyEmu:
     return PolyEmu(
         X,
         Y.reshape(-1, 1),
-        cross_validation=False,
+
         max_degree_forward=4,
         dim_reduction=False,
         random_state=0,

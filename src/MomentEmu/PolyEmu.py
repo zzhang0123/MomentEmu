@@ -32,6 +32,7 @@ from MomentEmu.monomials import (
 )
 from MomentEmu.MomentEmu import (
     generate_moment_products,
+    press_loo,
     solve_emulator_coefficients,
     predictive_mse_aic_bic,
     select_best_model,
@@ -453,7 +454,7 @@ class PolyEmu():
                 X_test=None, 
                 Y_test=None, 
                 log_Y=False,
-                cross_validation=True,
+                cross_validation=None,
                 test_size=0.15, 
                 # RMSE_upper=1.0,
                 RMSE_tol=1e-2, 
@@ -527,7 +528,6 @@ class PolyEmu():
         
         # Imported here, not at module scope, so `import MomentEmu` and the
         # numpy-only inference path do not pay for sklearn (P0.9).
-        from sklearn.model_selection import train_test_split
         from sklearn.preprocessing import StandardScaler
 
         # D15: post-hoc mode pruning is retired in 2.0.0. Keep accepting the
@@ -571,20 +571,30 @@ class PolyEmu():
         self.random_state = random_state
         self.verbose = verbose
         configure_logging(verbose)
+        self.loo_rmse_ = None
+        self.leverage_max_train_ = None
+
+        # D14: cross_validation is deprecated. Without an explicit X_test the
+        # degree is selected by exact leave-one-out PRESS on all N (P1.5); with
+        # X_test the held-out RMSE is used.
+        if cross_validation is not None:
+            warnings.warn(
+                "cross_validation is deprecated and ignored in 2.0.0: without "
+                "X_test/Y_test the degree is selected by leave-one-out PRESS on "
+                "all N. Pass X_test/Y_test for a held-out split. Removed in 3.0.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if batch_size is None:
             batch_size = X.shape[0]
 
-        if X_test is None or Y_test is None:
-            if cross_validation:
-                # Split into training and validation
-                X_train, X_val, Y_train, Y_val = train_test_split(
-                    X, Y, test_size=test_size, random_state=random_state
-                )
-                cross_val = True
-            else:
-                X_train, Y_train = X, Y
-                cross_val = False
+        use_loo = X_test is None
+        if use_loo:
+            # Fit on all N; the sweep scores each degree by LOO PRESS.
+            X_train, Y_train = X, Y
+            X_val, Y_val = None, None
+            cross_val = False
         else:
             X_train, Y_train = X, Y
             X_val, Y_val = X_test, Y_test
@@ -655,7 +665,8 @@ class PolyEmu():
                 max_degree=max_degree_forward,
                 dim_reduction=dim_reduction,
                 per_mode_thres=per_mode_thres,
-                batch_size=batch_size
+                batch_size=batch_size,
+                loo=use_loo,
             )
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
@@ -726,7 +737,8 @@ class PolyEmu():
                                             max_degree=max_degree_backward,
                                             dim_reduction=dim_reduction,
                                             per_mode_thres=per_mode_thres,
-                                            batch_size=batch_size)
+                                            batch_size=batch_size,
+                                            loo=use_loo)
             if return_max_frac_err:
                 # Convert scaled validation data back to original scale for proper comparison
                 X_val_unscaled, Y_val_unscaled = _unscale_val(
@@ -750,7 +762,8 @@ class PolyEmu():
                                   max_degree=None,
                                   dim_reduction=False,
                                   per_mode_thres=None,
-                                  batch_size=10000):
+                                  batch_size=10000,
+                                  loo=False):
 
         if init_deg is None:
             if self.n_params > 6:
@@ -776,6 +789,9 @@ class PolyEmu():
         running_time_list = []
         degree_list = []
         cond_list = []
+        loo_list = []
+        loo_per_output_list = []
+        leverage_list = []
         import time
 
         # D16: a k-level axis identifies x_i^d only for d <= k - 1, so drop
@@ -785,7 +801,7 @@ class PolyEmu():
         axis_warned = False
         n_distinct = None
         D_prev = -1
-        validation_is_training = X_val_scaled is X_train_scaled
+        validation_is_training = (not loo) and (X_val_scaled is X_train_scaled)
         if validation_is_training:
             warnings.warn(
                 "the validation set is the training set (cross_validation=False "
@@ -798,7 +814,8 @@ class PolyEmu():
         # Scale-free RMSE_tol (P1.4): compare against the RMS of the
         # validation Y in the same space, so rescaling the data with
         # with_std=False does not change the selected degree.
-        _y_rms = float(np.sqrt(np.mean(np.asarray(Y_val_scaled) ** 2)))
+        _ref_Y = Y_train_scaled if loo else Y_val_scaled
+        _y_rms = float(np.sqrt(np.mean(np.asarray(_ref_Y) ** 2)))
         rmse_ref = _y_rms if _y_rms > 0 else 1.0
 
         for d in range(init_deg, max_degree + 1):
@@ -841,49 +858,61 @@ class PolyEmu():
                     f"or lower the degree."
                 )
 
-            M, nu = compute_moments_vector_output_batched(
-                X_train_scaled, Y_train_scaled, multi_indices, batch_size=batch_size
-            )
-            coeffs, cond = solve_emulator_coefficients(
-                M, nu, on_singular="warn", degree=d, return_cond=True
-            )
-            if not np.isfinite(coeffs).all():
-                stop_reason = "Cholesky failed"
-                break
-            degree_list.append(d)
-            cond_list.append(float(cond))
-
-            # Y_val_pred = evaluate_emulator(X_val_scaled, coeffs, multi_indices)
-            Y_val_pred = evaluate_emulator_batched(
-                X_val_scaled, coeffs, multi_indices, batch_size=batch_size
-            )
-
-            RMSE_val, AIC, BIC = predictive_mse_aic_bic(Y_val_scaled, Y_val_pred, multi_indices.shape[0], n_train=X_train_scaled.shape[0])
-            RMSE_val_list.append(RMSE_val)
-            AIC_list.append(AIC)
-            BIC_list.append(BIC)
-
-            # if RMSE_val < RMSE_upper: # if the RMSE is lower than the upper bound, we accept the model, and save it for later selection
-            #     coeffs_list.append(coeffs)
-            #     multi_indices_list.append(multi_indices)
-            # else: # If the RMSE exceeds the upper bound, we reject the model straight away.
-            #     coeffs_list.append(None) 
-            #     multi_indices_list.append(None)
+            if loo:
+                # Fit on all N and score by exact leave-one-out PRESS from the
+                # same Cholesky factor (P1.5). The metric in RMSE_val_list is
+                # the LOO-RMSE, so selection is uniform.
+                _plan = MonomialPlan.build(multi_indices)
+                Phi = _plan.evaluate(X_train_scaled)
+                M = Phi.T @ Phi / X_train_scaled.shape[0]
+                nu = Phi.T @ Y_train_scaled / X_train_scaled.shape[0]
+                coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
+                    M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d
+                )
+                if not np.isfinite(coeffs).all():
+                    stop_reason = "Cholesky failed"
+                    break
+                degree_list.append(d)
+                cond_list.append(float(cond))
+                RMSE_val_list.append(loo_rmse)
+                loo_per_output_list.append(loo_per_out)
+                leverage_list.append(lev_max)
+                metric = loo_rmse
+            else:
+                M, nu = compute_moments_vector_output_batched(
+                    X_train_scaled, Y_train_scaled, multi_indices, batch_size=batch_size
+                )
+                coeffs, cond = solve_emulator_coefficients(
+                    M, nu, on_singular="warn", degree=d, return_cond=True
+                )
+                if not np.isfinite(coeffs).all():
+                    stop_reason = "Cholesky failed"
+                    break
+                degree_list.append(d)
+                cond_list.append(float(cond))
+                Y_val_pred = evaluate_emulator_batched(
+                    X_val_scaled, coeffs, multi_indices, batch_size=batch_size
+                )
+                RMSE_val, AIC, BIC = predictive_mse_aic_bic(
+                    Y_val_scaled, Y_val_pred, multi_indices.shape[0],
+                    n_train=X_train_scaled.shape[0],
+                )
+                RMSE_val_list.append(RMSE_val)
+                AIC_list.append(AIC)
+                BIC_list.append(BIC)
+                metric = RMSE_val
 
             coeffs_list.append(coeffs)
             multi_indices_list.append(multi_indices)
+            running_time_list.append(time.time() - start_time)
 
-            end_time = time.time()
-            running_time = end_time - start_time
-            running_time_list.append(running_time)
-
-            if cond >= COND_RAISE and validation_is_training:
-                stop_reason = "cond(M) >= 1e16 with in-sample validation"
+            if cond >= COND_RAISE and (loo or validation_is_training):
+                stop_reason = "cond(M) >= 1e16"
                 break
             if check_sweep_rmse(RMSE_val_list, degree_list):
-                stop_reason = "validation RMSE blow-up"
+                stop_reason = "RMSE blow-up"
                 break
-            if (not validation_is_training) and RMSE_val < RMSE_tol * rmse_ref:
+            if (not validation_is_training) and metric < RMSE_tol * rmse_ref:
                 stop_reason = "RMSE_tol met"
                 break
 
@@ -893,9 +922,9 @@ class PolyEmu():
                 f"the last stop reason was {stop_reason!r}."
             )
         if stop_reason == "reached max_degree":
-            ind = select_best_model(
-                RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol
-            )
+            # AIC/BIC are no longer used for selection (P1.5): choose the
+            # simplest model within fRMSE_tol of the best LOO/held-out RMSE.
+            ind = select_best_model(RMSE_val_list, rmse_tol=fRMSE_tol)
         else:
             # Early stop (RMSE_tol, blow-up, singular or a frozen capped basis):
             # keep the lowest finite-RMSE rung fitted so far.
@@ -906,12 +935,17 @@ class PolyEmu():
         multi_indices = multi_indices_list[ind]
         self.forward_degree = degree_list[ind]
         self.forward_cond_est_ = cond_list[ind]
-        _sel_pred = evaluate_emulator_batched(
-            X_val_scaled, coeffs, multi_indices, batch_size=batch_size
-        )
-        self.forward_RMSE_per_output_ = np.sqrt(
-            np.mean((_sel_pred - Y_val_scaled) ** 2, axis=0)
-        )
+        if loo:
+            self.loo_rmse_ = float(RMSE_val_list[ind])
+            self.leverage_max_train_ = float(leverage_list[ind])
+            self.forward_RMSE_per_output_ = np.asarray(loo_per_output_list[ind])
+        else:
+            _sel_pred = evaluate_emulator_batched(
+                X_val_scaled, coeffs, multi_indices, batch_size=batch_size
+            )
+            self.forward_RMSE_per_output_ = np.sqrt(
+                np.mean((_sel_pred - Y_val_scaled) ** 2, axis=0)
+            )
 
         self.forward_coeffs = coeffs
         self.forward_multi_indices = multi_indices
@@ -1001,7 +1035,8 @@ class PolyEmu():
                                    max_degree=None,
                                    dim_reduction=False,
                                    per_mode_thres=None, 
-                                   batch_size=10000):
+                                   batch_size=10000,
+                                   loo=False):
         if init_deg is None:
             if self.n_outputs > 6:
                 init_deg = 1
@@ -1026,6 +1061,9 @@ class PolyEmu():
         running_time_list = []
         degree_list = []
         cond_list = []
+        loo_list = []
+        loo_per_output_list = []
+        leverage_list = []
         import time
 
         # Same D16 axis cap and sample guards as the forward sweep, with
@@ -1034,7 +1072,7 @@ class PolyEmu():
         axis_warned = False
         n_distinct = None
         D_prev = -1
-        validation_is_training = Y_val_scaled is Y_train_scaled
+        validation_is_training = (not loo) and (Y_val_scaled is Y_train_scaled)
         if validation_is_training:
             warnings.warn(
                 "the backward validation set is the training set "
@@ -1045,7 +1083,8 @@ class PolyEmu():
                 stacklevel=2,
             )
         stop_reason = "reached max_degree"
-        _x_rms = float(np.sqrt(np.mean(np.asarray(X_val_scaled) ** 2)))
+        _ref_X = X_train_scaled if loo else X_val_scaled
+        _x_rms = float(np.sqrt(np.mean(np.asarray(_ref_X) ** 2)))
         rmse_ref = _x_rms if _x_rms > 0 else 1.0
 
         for d in range(init_deg, max_degree + 1):
@@ -1087,46 +1126,58 @@ class PolyEmu():
                     f"or lower the degree."
                 )
 
-            M, nu = compute_moments_vector_output_batched(
-                Y_train_scaled, X_train_scaled, multi_indices, batch_size=batch_size
-            )
-            coeffs, cond = solve_emulator_coefficients(
-                M, nu, on_singular="warn", degree=d, return_cond=True
-            )
-            if not np.isfinite(coeffs).all():
-                stop_reason = "Cholesky failed"
-                break
-            degree_list.append(d)
-            cond_list.append(float(cond))
-
-            # X_val_pred = evaluate_emulator(Y_val_scaled, coeffs, multi_indices)
-            X_val_pred = evaluate_emulator_batched(
-                Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
-            )
-
-            RMSE_val, AIC, BIC = predictive_mse_aic_bic(X_val_scaled, X_val_pred, multi_indices.shape[0], n_train=Y_train_scaled.shape[0])
-            RMSE_val_list.append(RMSE_val)
-            AIC_list.append(AIC)
-            BIC_list.append(BIC)
-
-            # if RMSE_val < RMSE_upper: # if the RMSE is lower than the upper bound, we accept the model, and save it for later selection
-            #     coeffs_list.append(coeffs)
-            #     multi_indices_list.append(multi_indices)
-            # else: # If the RMSE exceeds the upper bound, we reject the model straight away.
-            #     coeffs_list.append(None) 
-            #     multi_indices_list.append(None)
+            if loo:
+                _plan = MonomialPlan.build(multi_indices)
+                Phi = _plan.evaluate(Y_train_scaled)
+                M = Phi.T @ Phi / Y_train_scaled.shape[0]
+                nu = Phi.T @ X_train_scaled / Y_train_scaled.shape[0]
+                coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
+                    M, nu, Phi, X_train_scaled, on_singular="warn", degree=d
+                )
+                if not np.isfinite(coeffs).all():
+                    stop_reason = "Cholesky failed"
+                    break
+                degree_list.append(d)
+                cond_list.append(float(cond))
+                RMSE_val_list.append(loo_rmse)
+                loo_per_output_list.append(loo_per_out)
+                leverage_list.append(lev_max)
+                metric = loo_rmse
+            else:
+                M, nu = compute_moments_vector_output_batched(
+                    Y_train_scaled, X_train_scaled, multi_indices, batch_size=batch_size
+                )
+                coeffs, cond = solve_emulator_coefficients(
+                    M, nu, on_singular="warn", degree=d, return_cond=True
+                )
+                if not np.isfinite(coeffs).all():
+                    stop_reason = "Cholesky failed"
+                    break
+                degree_list.append(d)
+                cond_list.append(float(cond))
+                X_val_pred = evaluate_emulator_batched(
+                    Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
+                )
+                RMSE_val, AIC, BIC = predictive_mse_aic_bic(
+                    X_val_scaled, X_val_pred, multi_indices.shape[0],
+                    n_train=Y_train_scaled.shape[0],
+                )
+                RMSE_val_list.append(RMSE_val)
+                AIC_list.append(AIC)
+                BIC_list.append(BIC)
+                metric = RMSE_val
 
             coeffs_list.append(coeffs)
             multi_indices_list.append(multi_indices)
             running_time_list.append(time.time() - start_time)
 
-            if cond >= COND_RAISE and validation_is_training:
-                stop_reason = "cond(M) >= 1e16 with in-sample validation"
+            if cond >= COND_RAISE and (loo or validation_is_training):
+                stop_reason = "cond(M) >= 1e16"
                 break
             if check_sweep_rmse(RMSE_val_list, degree_list):
-                stop_reason = "validation RMSE blow-up"
+                stop_reason = "RMSE blow-up"
                 break
-            if (not validation_is_training) and RMSE_val < RMSE_tol * rmse_ref:
+            if (not validation_is_training) and metric < RMSE_tol * rmse_ref:
                 stop_reason = "RMSE_tol met"
                 break
 
@@ -1136,9 +1187,7 @@ class PolyEmu():
                 f"the last stop reason was {stop_reason!r}."
             )
         if stop_reason == "reached max_degree":
-            ind = select_best_model(
-                RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol
-            )
+            ind = select_best_model(RMSE_val_list, rmse_tol=fRMSE_tol)
         else:
             finite = np.isfinite(np.asarray(RMSE_val_list, dtype=np.float64))
             masked = np.where(finite, RMSE_val_list, np.inf)
@@ -1147,12 +1196,17 @@ class PolyEmu():
         multi_indices = multi_indices_list[ind]
         self.backward_degree = degree_list[ind]
         self.backward_cond_est_ = cond_list[ind]
-        _sel_pred = evaluate_emulator_batched(
-            Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
-        )
-        self.backward_RMSE_per_output_ = np.sqrt(
-            np.mean((_sel_pred - X_val_scaled) ** 2, axis=0)
-        )
+        if loo:
+            self.backward_loo_rmse_ = float(RMSE_val_list[ind])
+            self.backward_leverage_max_train_ = float(leverage_list[ind])
+            self.backward_RMSE_per_output_ = np.asarray(loo_per_output_list[ind])
+        else:
+            _sel_pred = evaluate_emulator_batched(
+                Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
+            )
+            self.backward_RMSE_per_output_ = np.sqrt(
+                np.mean((_sel_pred - X_val_scaled) ** 2, axis=0)
+            )
 
         self.backward_coeffs = coeffs
         self.backward_multi_indices = multi_indices

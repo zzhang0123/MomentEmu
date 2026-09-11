@@ -26,7 +26,7 @@ def plain_emu():
     rng = np.random.default_rng(7)
     X = rng.uniform(-1.0, 1.0, (300, 3))
     Y = (X[:, 0] ** 2 + np.sin(X[:, 1]) + X[:, 2]).reshape(-1, 1)
-    return PolyEmu(X, Y, cross_validation=False, max_degree_forward=3, dim_reduction=False)
+    return PolyEmu(X, Y, max_degree_forward=3, dim_reduction=False)
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +37,7 @@ def no_std_emu():
     return PolyEmu(
         X,
         Y,
-        cross_validation=False,
+
         standardize_Y_with_std=False,
         max_degree_forward=3,
         dim_reduction=False,
@@ -50,7 +50,7 @@ def logy_emu():
     X = rng.uniform(-1.0, 1.0, (300, 2))
     Y = np.exp(X[:, 0] + 0.5 * X[:, 1]).reshape(-1, 1)
     return PolyEmu(
-        X, Y, log_Y=True, cross_validation=False, max_degree_forward=3, dim_reduction=False
+        X, Y, log_Y=True, max_degree_forward=3, dim_reduction=False
     )
 
 
@@ -92,7 +92,7 @@ def test_n1_1d_batch(plain_emu):
     rng = np.random.default_rng(12)
     X = rng.uniform(-1.0, 1.0, (100, 1))
     Y = (X[:, 0] ** 2).reshape(-1, 1)
-    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=3, dim_reduction=False)
+    emu = PolyEmu(X, Y, max_degree_forward=3, dim_reduction=False)
     f = create_jax_emulator(emu)
     # n_params == 1: a length-1 1-D array is one sample.
     assert np.asarray(f(jnp.array([0.5]))).shape == (1,)

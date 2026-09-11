@@ -45,7 +45,7 @@ def test_fit_stores_cond_estimates():
     rng = np.random.default_rng(1)
     X = rng.uniform(-1, 1, (300, 3))
     Y = (X[:, 0] ** 2 + X[:, 1]).reshape(-1, 1)
-    emu = PolyEmu(X, Y, cross_validation=False, max_degree_forward=3, dim_reduction=False)
+    emu = PolyEmu(X, Y, max_degree_forward=3, dim_reduction=False)
     assert np.isfinite(emu.forward_cond_est_)
     assert emu.forward_cond_est_ > 0
 
@@ -85,6 +85,6 @@ def test_grid_fit_uses_axis_cap_and_warns():
     Y = (X[:, 0] + 0.5 * X[:, 1] + 0.25 * X[:, 2] + 0.3 * X[:, 0] * X[:, 1]).reshape(-1, 1)
     with pytest.warns(UserWarning, match="grid design detected"):
         emu = PolyEmu(
-            X, Y, cross_validation=False, max_degree_forward=2, dim_reduction=False
+            X, Y, max_degree_forward=2, dim_reduction=False
         )
     assert emu.forward_multi_indices.shape[0] == 7

@@ -64,14 +64,19 @@ def test_logy_ignored_by_all_three_backends(logy_emu):
     assert np.max(np.abs(got - logy_emu.forward_emulator(X))) / np.max(
         np.abs(logy_emu.forward_emulator(X))
     ) < 1e-12
-    for make in (TorchMomentEmu, create_symbolic_emulator):
-        with pytest.raises(NotImplementedError):
-            make(logy_emu)
+    # P2.4 added symbolic log_Y export.
+    from MomentEmu.symbolic_momentemu import create_symbolic_emulator as make_sym
+
+    assert make_sym(logy_emu, ["p0", "p1"])["expression"] is not None
+    with pytest.raises(NotImplementedError):
+        TorchMomentEmu(logy_emu)
 
 
 def test_autodiff_wrappers_ignore_log_y(logy_emu):
-    with pytest.raises(NotImplementedError):
-        logy_emu.generate_forward_symb_emu()
+    import sympy as sp
+
+    exprs = logy_emu.generate_forward_symb_emu()
+    assert exprs[0].has(sp.exp)
 
 
 def test_tests_do_not_import_repo_code():
@@ -125,8 +130,15 @@ def test_max_order_off_by_one():
 
 
 def test_symb_emu_ignores_log_y(logy_emu):
-    with pytest.raises(NotImplementedError):
-        logy_emu.generate_backward_symb_emu()
+    import sympy as sp
+
+    # A forward-only emulator has no backward coefficients; the export
+    # must raise AttributeError rather than return log Y.
+    if not hasattr(logy_emu, "backward_coeffs"):
+        with pytest.raises(AttributeError):
+            logy_emu.generate_backward_symb_emu()
+    else:
+        assert logy_emu.generate_backward_symb_emu()
 
 
 def test_frac_err_masked_column_reports_zero():
@@ -266,7 +278,6 @@ def test_torch_inplace_phi_breaks_vmap(emu):
     assert grads.shape == (50, 3) and bool(torch.isfinite(grads).all())
 
 
-@pytest.mark.xfail(strict=True, reason="P2.4 symbolic rewrite")
 def test_symbolic_expr_unbound_monomial():
     from MomentEmu.PolyEmu import symbolic_polynomial_expressions
 
@@ -444,7 +455,6 @@ def test_readme_jax_example_import_broken():
     assert "from MomentEmu.jax_momentemu import create_jax_emulator" in text
 
 
-@pytest.mark.xfail(strict=True, reason="P2.4 symbolic rewrite")
 def test_sympy_simplify_wasted_in_symbolic_export():
     from pathlib import Path
 

@@ -251,46 +251,69 @@ def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000)
     
     return Mm, nu
 
-def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None, 
-                                    input_means=None, input_vars=None, 
-                                    output_means=None, output_vars=None):
-    """
-    Convert emulator coefficients into sympy expressions.
-    coeffs: D x m (number of basis terms × number of outputs)
-    multi_indices: list of α
-    Returns: list of sympy expressions, one per output dimension
+def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
+                                    input_means=None, input_vars=None,
+                                    output_means=None, output_vars=None,
+                                    *, log_input=False, log_output=False,
+                                    raw_units=False):
+    """Convert emulator coefficients into sympy expressions (P2.4, D11).
+
+    The default form keeps the standardized coordinates
+    z_i = (x_i - m_i)/s_i as an unexpanded rational expression, evaluated with
+    17 significant digits. Expanding in raw units loses digits with degree (up
+    to 8.3e-9 at n=6, d=6 in the review), so raw_units=True warns.
+    log_input substitutes log of the input variables (backward export of a
+    log_Y emulator); log_output wraps the result in exp(..., evaluate=False).
     """
     import sympy as sp
 
+    if raw_units:
+        warnings.warn(
+            "raw_units=True expands the polynomial in raw coordinates, which "
+            "loses digits as the degree grows (up to 8.3e-9 at n=6, d=6); the "
+            "default standardized z-form is numerically safe.",
+            UserWarning,
+            stacklevel=2,
+        )
+    coeffs = np.asarray(coeffs, dtype=float)
+    mi = np.asarray(multi_indices)
     D, m = coeffs.shape
-    n = len(multi_indices[0])
+    n = mi.shape[1]
     if variable_names is None:
         variable_names = [f"x{i+1}" for i in range(n)]
-    vars_sym = sp.symbols(variable_names)
-
-    if input_vars is not None:
-        input_stds = np.sqrt(input_vars)
-    else:
-        input_stds = None
-    if output_vars is not None:
-        output_stds = np.sqrt(output_vars)
-    else:
-        output_stds = None
-
+    vars_sym = [sp.Symbol(name) for name in variable_names]
+    input_mean = np.zeros(n) if input_means is None else np.asarray(input_means, float)
+    input_std = np.ones(n) if input_vars is None else np.sqrt(np.asarray(input_vars, float))
+    output_mean = np.zeros(m) if output_means is None else np.asarray(output_means, float)
+    output_std = np.ones(m) if output_vars is None else np.sqrt(np.asarray(output_vars, float))
+    z_syms = sp.symbols([f"__z{i}" for i in range(n)])
+    substitutions = {}
+    for i in range(n):
+        xi = vars_sym[i]
+        if log_input:
+            xi = sp.log(xi, evaluate=False)
+        substitutions[z_syms[i]] = (
+            xi - sp.Float(float(input_mean[i]), 17)
+        ) / sp.Float(float(input_std[i]), 17)
     expressions = []
-    for j in range(m):  # For each output dimension
-        expr = 0
-        for c, alpha in zip(coeffs[:, j], multi_indices):
-            if input_means is not None and input_stds is not None:
-                monomial = np.prod([ ( (vars_sym[i] - input_means[i]) / input_stds[i] )**alpha[i] for i in range(n)])
-            elif input_means is not None:
-                monomial = np.prod([ (vars_sym[i] - input_means[i])**alpha[i] for i in range(n)])
-            expr += c * monomial
-        if output_means is not None and output_stds is not None:
-            expr = expr * output_stds[j] + output_means[j]
-        elif output_means is not None:
-            expr = expr + output_means[j]
-        expressions.append(sp.simplify(expr))
+    for j in range(m):
+        terms = {}
+        for c, alpha in zip(coeffs[:, j], mi):
+            key = tuple(int(a) for a in alpha)
+            terms[key] = terms.get(key, sp.Integer(0)) + sp.Float(float(c), 17)
+        poly = sp.Poly.from_dict(terms, z_syms)
+        # xreplace is a direct tree substitution and is ~8x faster than subs
+        # here (0.019 s vs 0.157 s at D=462), which keeps the export under 0.1 s.
+        expr = poly.as_expr().xreplace(substitutions)
+        if raw_units:
+            expr = sp.expand(expr)
+        if float(output_std[j]) != 1.0:
+            expr = expr * sp.Float(float(output_std[j]), 17)
+        if float(output_mean[j]) != 0.0:
+            expr = expr + sp.Float(float(output_mean[j]), 17)
+        if log_output:
+            expr = sp.exp(expr, evaluate=False)
+        expressions.append(expr)
     return expressions
 
 def evaluate_emulator(X, coeffs, multi_indices):
@@ -1366,34 +1389,40 @@ class PolyEmu():
             X_pred = X_pred.reshape(Yshape[:-1] + (self.n_params,))
         return X_pred
 
-    def generate_forward_symb_emu(self, variable_names=None):
-        if self.log_Y:
-            raise NotImplementedError(
-                "symbolic export of a log_Y emulator is not implemented yet "
-                "(P2.4); the returned expression would be in log Y."
-            )
+    def generate_forward_symb_emu(self, variable_names=None, *, raw_units=False):
+        """SymPy expressions for the forward emulator (P2.4, D11).
+
+        Standardized z-form by default; log_Y wraps the result in exp.
+        """
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
-        exprs = symbolic_polynomial_expressions(self.forward_coeffs, 
-                                                self.forward_multi_indices, 
-                                                variable_names=variable_names, 
-                                                input_means=self.scaler_X.mean_, 
-                                                input_vars=self.scaler_X.var_,
-                                                output_means=self.scaler_Y.mean_, 
-                                                output_vars=Y_var)
+        exprs = symbolic_polynomial_expressions(
+            self.forward_coeffs,
+            self.forward_multi_indices,
+            variable_names=variable_names,
+            input_means=self.scaler_X.mean_,
+            input_vars=self.scaler_X.var_,
+            output_means=self.scaler_Y.mean_,
+            output_vars=Y_var,
+            log_output=self.log_Y,
+            raw_units=raw_units,
+        )
         return exprs
-    
-    def generate_backward_symb_emu(self, variable_names=None):
-        if self.log_Y:
-            raise NotImplementedError(
-                "symbolic export of a log_Y emulator is not implemented yet "
-                "(P2.4); the returned expression would be in log Y."
-            )
+
+    def generate_backward_symb_emu(self, variable_names=None, *, raw_units=False):
+        """SymPy expressions for the backward emulator (P2.4, D11).
+
+        z-form by default; log_Y substitutes log of the input variables.
+        """
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
-        exprs = symbolic_polynomial_expressions(self.backward_coeffs, 
-                                                self.backward_multi_indices, 
-                                                variable_names=variable_names, 
-                                                input_means=self.scaler_Y.mean_, 
-                                                input_vars=Y_var,
-                                                output_means=self.scaler_X.mean_,
-                                                output_vars=self.scaler_X.var_)
+        exprs = symbolic_polynomial_expressions(
+            self.backward_coeffs,
+            self.backward_multi_indices,
+            variable_names=variable_names,
+            input_means=self.scaler_Y.mean_,
+            input_vars=Y_var,
+            output_means=self.scaler_X.mean_,
+            output_vars=self.scaler_X.var_,
+            log_input=self.log_Y,
+            raw_units=raw_units,
+        )
         return exprs

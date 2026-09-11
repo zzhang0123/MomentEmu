@@ -66,10 +66,11 @@ def test_jax_backend_supports_logy(logy_emu):
     assert _col_rel(got, ref) < 1e-12
     with pytest.raises(NotImplementedError):
         TorchMomentEmu(logy_emu)
-    with pytest.raises(NotImplementedError):
-        create_symbolic_emulator(logy_emu)
-    with pytest.raises(NotImplementedError):
-        logy_emu.generate_forward_symb_emu()
+    # P2.4: the symbolic backend now exports log_Y as exp(...).
+    sym = create_symbolic_emulator(logy_emu, ["p0", "p1"])
+    got_sym = np.ravel(np.asarray(sym["lambdified"](*[X[:, i] for i in range(2)])))
+    ref_sym = np.ravel(logy_emu.forward_emulator(X))
+    assert _col_rel(got_sym, ref_sym) < 1e-12
 
 
 @pytest.mark.backend

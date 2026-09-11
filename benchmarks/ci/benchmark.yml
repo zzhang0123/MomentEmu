@@ -1,0 +1,57 @@
+# Proposed GitHub Actions workflow for the MomentEmu benchmark gate.
+# Copy to .github/workflows/benchmark.yml. The committed baseline lives in
+# bench/baseline/<runner-label>/ and is refreshed only by the
+# "refresh-baseline" job (manual dispatch), never by a PR.
+name: benchmark
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      refresh_baseline:
+        description: "Re-record the baseline on this runner"
+        default: "false"
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04           # pin the image: runner generation changes timings by 1.5-2x
+    timeout-minutes: 40
+    env:
+      OMP_NUM_THREADS: "2"          # fix the BLAS thread count so runs are comparable
+      OPENBLAS_NUM_THREADS: "2"
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e . pytest numpy scipy scikit-learn sympy
+      - name: unit tests (accuracy pins are also asserted here)
+        run: pytest tests/ -q
+      - name: run benchmark (numerical + timing suites; GP/MLP baselines skipped in CI)
+        run: python -m bench --suites accuracy,scaling,memory,pins,noise --out bench_results
+      - name: gate against committed baseline
+        run: |
+          python -m bench.gate \
+            --baseline bench/baseline/ubuntu-24.04 --current bench_results \
+            --time-tol 0.50 --rmse-tol 1e-6 --pin-tol 1e-10 --time-floor-us 100
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: bench-results, path: bench_results }
+
+  refresh-baseline:
+    if: github.event.inputs.refresh_baseline == 'true'
+    runs-on: ubuntu-24.04
+    env: { OMP_NUM_THREADS: "2", OPENBLAS_NUM_THREADS: "2" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e . numpy scipy scikit-learn sympy
+      # three runs; the gate compares against the per-cell minimum of the three
+      - run: |
+          for i in 1 2 3; do python -m bench --suites accuracy,scaling,memory,pins,noise --out run$i; done
+          python -m bench.merge_min run1 run2 run3 --out bench/baseline/ubuntu-24.04
+      - uses: peter-evans/create-pull-request@v6
+        with: { title: "chore: refresh benchmark baseline", branch: bench-baseline }

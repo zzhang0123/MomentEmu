@@ -469,11 +469,14 @@ def test_notebook_test_uses_removed_parameter():
 
 
 def test_batch_size_default_disables_batching():
+    # R1: the old default was N, which disabled batching for every realistic N.
+    # Use an N large enough that a cache-sized default must actually batch; a
+    # tiny N does not need batching and made this test demand a slow default.
     rng = np.random.default_rng(17)
-    X = rng.uniform(-1.0, 1.0, (1000, 3))
+    X = rng.uniform(-1.0, 1.0, (20000, 3))
     Y = (X[:, 0] ** 2).reshape(-1, 1)
     e = PolyEmu(X, Y, max_degree_forward=2, verbose=0)
-    assert e.batch_size_ < X.shape[0]
+    assert 0 < e.batch_size_ < X.shape[0]
 
 
 def test_filter_modes_joint_drop_no_control():

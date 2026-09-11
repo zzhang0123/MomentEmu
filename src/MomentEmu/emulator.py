@@ -53,7 +53,7 @@ MAX_BACKWARD_MOMENT_BYTES = 1 << 30  # 1 GiB
 # P5.2: default number of training rows per moment-build chunk. A cache-sized
 # constant keeps the batched build enabled by default instead of one all-N
 # batch that disables batching for every realistic N.
-DEFAULT_BATCH_SIZE = 512
+DEFAULT_BATCH_SIZE = 10000
 
 logger = logging.getLogger("MomentEmu")
 logger.addHandler(logging.NullHandler())
@@ -1334,8 +1334,18 @@ class PolyEmu:
         self.forward_AIC = float(AIC_list[ind]) if AIC_list else float("nan")
         self.forward_BIC = float(BIC_list[ind]) if BIC_list else float("nan")
         # Cholesky factor of the selected moment matrix, kept for leverage().
-        _final_plan = MonomialPlan.build(multi_indices)
-        _Phi = _final_plan.evaluate(X_train_scaled)
+        # Reuse the last incremental Phi when the selected rung is the last one
+        # fitted (the common case); otherwise rebuild it once.
+        if (
+            loo
+            and _inc.get("phi") is not None
+            and _inc.get("indices") is not None
+            and np.array_equal(np.asarray(multi_indices), _inc["indices"])
+        ):
+            _Phi = _inc["phi"]
+        else:
+            _final_plan = MonomialPlan.build(multi_indices)
+            _Phi = _final_plan.evaluate(X_train_scaled)
         _M = _Phi.T @ _Phi / X_train_scaled.shape[0]
         self.forward_moment_matrix_ = _M
         self.forward_chol_ = _safe_cholesky(_M)

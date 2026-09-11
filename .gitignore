@@ -42,3 +42,7 @@ Thumbs.db
 # Coverage data
 .coverage
 coverage.xml
+
+# Local Phase 5 report and independent verification prompt (not for the published repo)
+PHASE5_REPORT.md
+PHASE5_VERIFICATION_PROMPT.md

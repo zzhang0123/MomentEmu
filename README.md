@@ -71,7 +71,7 @@ pip install -e '.[all]'  # Install in development mode with all features
 **Note**: Make sure to install MomentEmu first using one of the installation methods above.
 
 ```python
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu import PolyEmu
 import numpy as np
 
 # Generate example training data
@@ -163,12 +163,12 @@ assert diag["max_rel"] < 1e-5, (
 ### Available Frameworks:
 - **🚀 JAX**: High-performance computing with JIT compilation and GPU acceleration
 - **🔥 PyTorch**: Native neural network integration and ML pipeline compatibility  
-- **🔢 SymPy**: Exact symbolic differentiation with zero numerical error
+- **SymPy**: exact symbolic derivatives of the exported polynomial (its agreement with the emulator depends on the form and degree)
 
 ### Quick Example:
 ```python
 # JAX implementation
-from jax_momentemu import create_jax_emulator
+from MomentEmu.jax_momentemu import create_jax_emulator
 import jax.numpy as jnp
 from jax import grad
 
@@ -240,4 +240,29 @@ reflecting the fact that differentiation acts as a numerically unstable operator
 3. **L. N. Trefethen**, *Spectral Methods in MATLAB*  
    – Discusses how polynomial interpolation and spectral approximations behave under differentiation; very readable with practical insights.
 
+
+
+## Numerical accuracy and backends
+
+- At a fixed degree MomentEmu solves the same least-squares problem as
+  scikit-learn PolynomialFeatures + LinearRegression; the coefficients agree to
+  about 1e-13 on a well-conditioned design. Fit-speed differences come from the
+  solver (a Cholesky solve of the normal equations versus an SVD/lstsq), not
+  from a different estimator.
+- Backend choice:
+
+  | use case | backend |
+  |---|---|
+  | cobaya / emcee (many independent single-point calls) | NumPy forward_emulator |
+  | numpyro / blackjax / Laplace / Fisher (derivatives, jit) | JAX create_jax_emulator |
+
+  The JAX backend adds derivatives of any order and composes inside a jit; a
+  batch-1 standalone JAX predict is slower than the vectorised NumPy path.
+- JAX needs jax.config.update("jax_enable_x64", True) for float64; construction
+  raises otherwise unless dtype=jnp.float32 is passed explicitly.
+- Training design: a k-level grid identifies a parameter power only up to k-1.
+  Use iid uniform or scrambled Sobol samples with N >= 10-20 D.
+- Validate in the units of your data: PolyEmu.validate(X, Y, sigma=...) reports
+  Delta-chi2, and posterior_bias reports the linearised shift in sigma.
+- See CHANGELOG.md for the 2.0.0 default-behaviour changes and deprecations.
 

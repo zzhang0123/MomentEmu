@@ -26,7 +26,7 @@ Choose the framework that best fits your needs:
     **Symbolic Computation**
     
     - Exact symbolic differentiation
-    - Zero numerical error
+    - Exact derivatives of the exported polynomial
     - Arbitrary-order derivatives  
     - Best for: Mathematical analysis, education
 
@@ -45,7 +45,7 @@ Based on comprehensive testing:
 ### Installation
 
 ```bash
-pip install "git+https://github.com/zzhang0123/MomentEmu.git[jax]"
+pip install "MomentEmu[jax] @ git+https://github.com/zzhang0123/MomentEmu.git"
 ```
 
 ### Basic Usage
@@ -92,7 +92,7 @@ hessian = jacfwd(grad(lambda x: jax_emu(x).sum()))(x)
 ### Installation
 
 ```bash
-pip install "git+https://github.com/zzhang0123/MomentEmu.git[torch]"
+pip install "MomentEmu[torch] @ git+https://github.com/zzhang0123/MomentEmu.git"
 ```
 
 ### Basic Usage
@@ -173,8 +173,9 @@ import sympy as sp
 
 # Access symbolic expressions
 expression = sym_dict["expression"] 
-gradient_expr = sym_dict["gradient"]
-hessian_expr = sym_dict["hessian"]
+symbolic = sym_dict["emulator"].get_symbolic_expressions()
+gradient_expr = symbolic["gradients"][0]
+hessian_expr = symbolic["hessians"][0]
 
 print(f"Function: {expression}")
 print(f"Gradient: {gradient_expr}")

@@ -22,6 +22,10 @@ from MomentEmu.guards import (
     count_distinct_rows,
     max_supported_degree,
 )
+from MomentEmu.monomials import (
+    MonomialPlan,
+    fold_output_affine,
+)
 from MomentEmu.MomentEmu import (
     generate_moment_products,
     solve_emulator_coefficients,
@@ -516,6 +520,13 @@ class PolyEmu():
         # in-place scaling transformation
         X_train = self.scaler_X.fit_transform(X_train) 
         Y_train = self.scaler_Y.fit_transform(Y_train) 
+        # Cached inverses for the folded inference path (P0.7). X is always
+        # standardized with std; Y may have scale_ = None (with_std=False).
+        self._inv_scale_X = 1.0 / self.scaler_X.scale_
+        _y_scale = self.scaler_Y.scale_
+        if _y_scale is None:
+            _y_scale = np.ones(self.n_outputs)
+        self._inv_scale_Y = 1.0 / _y_scale
         if cross_val:
             X_val = self.scaler_X.transform(X_val)
             Y_val = self.scaler_Y.transform(Y_val)
@@ -846,10 +857,31 @@ class PolyEmu():
         self.forward_BIC_list = BIC_list
         self.forward_running_time_list = running_time_list
         self.forward_degree_list = degree_list
-        
-        pass
+        self._build_forward_plan()
 
-    def forward_emulator(self, X):
+    def _build_forward_plan(self):
+        """Build the P0.7 monomial plan and folded output affine for inference."""
+        mi = np.asarray(self.forward_multi_indices)
+        self.forward_plan = MonomialPlan.build(mi)
+        scale_Y = self.scaler_Y.scale_
+        if scale_Y is None:
+            scale_Y = np.ones(self.n_outputs)
+        self.forward_coeffs_folded = fold_output_affine(
+            self.forward_coeffs, mi, self.scaler_Y.mean_, scale_Y
+        )
+
+    def _build_backward_plan(self):
+        """Build the P0.7 plan and folded output affine for the backward map."""
+        mi = np.asarray(self.backward_multi_indices)
+        self.backward_plan = MonomialPlan.build(mi)
+        scale_X = self.scaler_X.scale_
+        if scale_X is None:
+            scale_X = np.ones(self.n_params)
+        self.backward_coeffs_folded = fold_output_affine(
+            self.backward_coeffs, mi, self.scaler_X.mean_, scale_X
+        )
+
+    def forward_emulator(self, X, batch_size=None):
         # Check if the input is float, 1D or 2D
         float_or_int = isinstance(X, (float, int))
         if float_or_int:
@@ -868,17 +900,31 @@ class PolyEmu():
         if X.ndim != 2:
             X = X.reshape(-1, self.n_params)
 
-        X_scaled = self.scaler_X.transform(X)
-        Y_pred_scaled = evaluate_emulator(X_scaled, self.forward_coeffs, self.forward_multi_indices)
-        Y_pred = self.scaler_Y.inverse_transform(Y_pred_scaled)
+        # D1: predict in float64 even when the caller passes int/float32.
+        X = np.asarray(X, dtype=np.float64)
+        if getattr(self, "forward_plan", None) is None:
+            self._build_forward_plan()
+        X_scaled = (X - self.scaler_X.mean_) * self._inv_scale_X
+        plan = self.forward_plan
+        C_fold = self.forward_coeffs_folded
+        if batch_size is None or batch_size >= X_scaled.shape[0]:
+            Y_pred = plan.evaluate(X_scaled) @ C_fold
+        else:
+            Y_pred = np.concatenate(
+                [
+                    plan.evaluate(X_scaled[s:s + batch_size]) @ C_fold
+                    for s in range(0, X_scaled.shape[0], batch_size)
+                ],
+                axis=0,
+            )
+        if self.log_Y:
+            Y_pred = np.exp(Y_pred)
         if float_or_int:
             Y_pred = Y_pred[0]
             if self.n_outputs == 1:
                 Y_pred = Y_pred[0]
         else:
             Y_pred = Y_pred.reshape(Xshape[:-1] + (self.n_outputs,))
-        if self.log_Y:
-            return np.exp(Y_pred)
         return Y_pred
 
     def generate_backward_emulator(self, 
@@ -1064,10 +1110,9 @@ class PolyEmu():
         self.backward_BIC_list = BIC_list
         self.backward_running_time_list = running_time_list
         self.backward_degree_list = degree_list
+        self._build_backward_plan()
 
-        pass
-
-    def backward_emulator(self, Y):
+    def backward_emulator(self, Y, batch_size=None):
         float_or_int = isinstance(Y, (float, int))
         if float_or_int:
             Y = np.array([[Y]])
@@ -1087,9 +1132,22 @@ class PolyEmu():
         if Y.ndim != 2:
             Y = Y.reshape(-1, self.n_outputs)
 
-        Y_scaled = self.scaler_Y.transform(Y)
-        X_pred_scaled = evaluate_emulator(Y_scaled, self.backward_coeffs, self.backward_multi_indices)
-        X_pred = self.scaler_X.inverse_transform(X_pred_scaled)
+        Y = np.asarray(Y, dtype=np.float64)
+        if getattr(self, "backward_plan", None) is None:
+            self._build_backward_plan()
+        Y_scaled = (Y - self.scaler_Y.mean_) * self._inv_scale_Y
+        plan = self.backward_plan
+        C_fold = self.backward_coeffs_folded
+        if batch_size is None or batch_size >= Y_scaled.shape[0]:
+            X_pred = plan.evaluate(Y_scaled) @ C_fold
+        else:
+            X_pred = np.concatenate(
+                [
+                    plan.evaluate(Y_scaled[s:s + batch_size]) @ C_fold
+                    for s in range(0, Y_scaled.shape[0], batch_size)
+                ],
+                axis=0,
+            )
         if float_or_int:
             X_pred = X_pred[0]
             if self.n_params == 1:

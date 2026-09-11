@@ -5,6 +5,16 @@ from typing import Any
 
 import numpy as np
 
+from MomentEmu.guards import (
+    COND_RAISE,
+    COND_WARN,
+    IllConditionedError,
+    IllConditionedWarning,
+    check_coefficients_finite,
+    check_conditioning,
+    finite_candidates,
+)
+
 
 ####### Moment vector and matrix #################
 
@@ -24,17 +34,75 @@ def generate_moment_products(Phi, Y):
     nu = (Phi.T @ Y) / N                       # D x m
     return M, nu
 
-def solve_emulator_coefficients(M, nu):
-    """
-    Solve Mc = ν for each output dimension
-    
+def solve_emulator_coefficients(
+    M,
+    nu,
+    *,
+    on_singular: str = "raise",
+    warn_at: float = COND_WARN,
+    raise_at: float = COND_RAISE,
+    degree: int | None = None,
+    return_cond: bool = False,
+):
+    """Solve M c = nu for every output with a checked Cholesky factorisation.
+
     Args:
-        M: moment matrix (D x D), where D is the number of basis functions.
-        nu: moment vector (D x m), where m is the number of output variables.
-        
-    Returns: coefficients array of shape D x m
+        M: moment matrix (D x D).
+        nu: moment vector (D x m).
+        on_singular: "raise" (default, direct calls) turns a numerically
+            singular M or a failed Cholesky into IllConditionedError; "warn"
+            warns and returns NaN coefficients with an infinite condition,
+            which is what the degree sweep uses before dropping the rung.
+        warn_at, raise_at: condition-number levels (D12).
+        degree: sweep degree, used only in messages.
+        return_cond: also return the condition estimate.
+
+    Returns:
+        coefficients (D x m), or (coefficients, cond) when return_cond=True.
+
+    The estimate is the LAPACK dpocon 1-norm estimate from the Cholesky
+    factor for large D and the exact symmetric 2-norm condition for D <= 200;
+    it overestimates the 2-norm value by 2.7-6.3x on real moment matrices, so
+    the 1e12 warning fires conservatively.
     """
-    return np.linalg.solve(M, nu)  # D x m
+    M = np.asarray(M, dtype=np.float64)
+    nu = np.asarray(nu, dtype=np.float64)
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError(f"M must be a square 2-D matrix, got shape {M.shape}")
+    if nu.ndim != 2 or nu.shape[0] != M.shape[0]:
+        raise ValueError(
+            f"nu must be (D, m) with D = {M.shape[0]}, got shape {nu.shape}"
+        )
+    # Warn at the D12 levels and raise at cond >= 1e16 when on_singular="raise".
+    rep = check_conditioning(
+        M,
+        warn_at=warn_at,
+        raise_at=raise_at,
+        on_singular=on_singular,
+        degree=degree,
+        n_samples=None,
+        method="auto",
+    )
+    from scipy.linalg import cho_factor, cho_solve
+
+    try:
+        cf, lower = cho_factor(M, lower=False, check_finite=False)
+    except np.linalg.LinAlgError as exc:
+        msg = (
+            f"Cholesky factorisation of the {M.shape[0]}x{M.shape[1]} moment "
+            f"matrix failed: M is not positive definite. The polynomial is not "
+            f"identifiable on this design; reduce the degree or add distinct samples."
+        )
+        if on_singular == "raise":
+            raise IllConditionedError(msg) from exc
+        warnings.warn(msg, IllConditionedWarning, stacklevel=2)
+        coeffs = np.full_like(nu, np.nan)
+        return (coeffs, float("inf")) if return_cond else coeffs
+    coeffs = cho_solve((cf, lower), nu, check_finite=False)
+    check_coefficients_finite(coeffs, degree=degree)
+    if return_cond:
+        return coeffs, rep.cond
+    return coeffs  # D x m
 
 def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
     """
@@ -184,40 +252,26 @@ def select_best_model(rmse_list, aic_list=None, bic_list=None, rmse_tol=0.05):
     best_idx : int
         Index of the selected model
     """
-    rmse = np.array(rmse_list)
-    n_models = len(rmse)
+    rmse = np.asarray(rmse_list, dtype=np.float64)
 
-    # Step 1: identify models within tolerance of lowest RMSE
-    rmse_min = rmse.min()
-    
-    # Check for invalid RMSE values
-    if not np.isfinite(rmse_min):
-        # If all RMSE values are invalid, select the first model
-        print("Warning: RMSE values are invalid (NaN or infinite). ")
-    
-    candidate_mask = rmse <= rmse_min * (1 + rmse_tol)
-    candidate_idxs = np.where(candidate_mask)[0]
-    
-    # Safety check: if no candidates found, expand the tolerance
-    if len(candidate_idxs) == 0:
-        print(f"Warning: No models found within {rmse_tol*100}% tolerance. Using all finite models.")
+    # Mask to finite RMSE first; finite_candidates raises ValueError naming the
+    # values when every candidate is NaN/inf (round-1 select-best-model-nan-crash).
+    # The minimum finite RMSE is always within tolerance of itself, so the
+    # candidate set is never empty and the old "expand the tolerance" branch was
+    # dead code.
+    finite = finite_candidates(rmse)
+    rmse_min = rmse[finite].min()
+    candidate_idxs = finite[rmse[finite] <= rmse_min * (1.0 + rmse_tol)]
 
-    print(f"Candidate models within {rmse_tol*100}% of min RMSE : {candidate_idxs}")
-    print(f"RMSE of candidate models : {rmse[candidate_idxs]}")
-
-    # Step 2: among candidates, pick model with lowest complexity proxy (BIC > AIC > RMSE)
+    # Among candidates pick the lowest complexity proxy (BIC > AIC > RMSE).
     if bic_list is not None:
-        bic = np.array(bic_list)
-        best_idx = candidate_idxs[np.argmin(bic[candidate_idxs])]
-        print(f"Selected best model index based on BIC : {best_idx}")
+        bic = np.asarray(bic_list, dtype=np.float64)
+        best_idx = int(candidate_idxs[np.argmin(bic[candidate_idxs])])
     elif aic_list is not None:
-        aic = np.array(aic_list)
-        best_idx = candidate_idxs[np.argmin(aic[candidate_idxs])]
-        print(f"Selected best model index based on AIC : {best_idx}")
+        aic = np.asarray(aic_list, dtype=np.float64)
+        best_idx = int(candidate_idxs[np.argmin(aic[candidate_idxs])])
     else:
-        # If no complexity info, pick the model with lowest RMSE
-        best_idx = candidate_idxs[np.argmin(rmse[candidate_idxs])]
-        print(f"Selected best model index based on RMSE : {best_idx}")
+        best_idx = int(candidate_idxs[np.argmin(rmse[candidate_idxs])])
 
     return best_idx
 

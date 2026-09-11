@@ -168,6 +168,44 @@ def check_distinct_rows(X: np.ndarray, basis_dim: int) -> int:
     return n_distinct
 
 
+def count_axis_levels(X: np.ndarray, *, rtol: float = 1e-9) -> np.ndarray:
+    """Number of distinct levels per input column (D16).
+
+    Two values count as the same level when they differ by at most
+    ``rtol * (max - min)`` of that column, so floating-point roundoff in a
+    grid coordinate does not inflate the level count. A constant column has
+    one level. Returns an int array of shape (n,).
+    """
+    X = np.asarray(X, dtype=np.float64)
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2-D, got shape {X.shape}")
+    if rtol < 0:
+        raise ValueError(f"rtol must be >= 0, got {rtol}")
+    counts = np.empty(X.shape[1], dtype=np.int64)
+    for i in range(X.shape[1]):
+        col = np.sort(X[:, i])
+        if col.size == 0:
+            counts[i] = 0
+            continue
+        tol = rtol * (col[-1] - col[0])
+        gaps = np.diff(col)
+        counts[i] = 1 + int(np.count_nonzero(gaps > tol))
+    return counts
+
+
+def check_axis_levels(X: np.ndarray, *, rtol: float = 1e-9) -> tuple[np.ndarray, np.ndarray]:
+    """Per-axis power caps L_i - 1 for a grid design (D16).
+
+    A k-level axis identifies x_i^d only for d <= k - 1, so any multi-index
+    with alpha_i > L_i - 1 is dropped. Returns ``(caps, levels)``; the caller
+    applies the cap to the index set and warns once when it removes a term.
+    This is not a total-degree cap: the total degree keeps rising on the
+    capped set.
+    """
+    levels = count_axis_levels(X, rtol=rtol)
+    return np.maximum(levels - 1, 0), levels
+
+
 # --------------------------------------------------------------------------
 # Array-level validation
 # --------------------------------------------------------------------------

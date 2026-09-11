@@ -11,8 +11,15 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from MomentEmu.guards import (
+    COND_RAISE,
+    IllConditionedError,
+    InsufficientSamplesError,
     basis_size,
+    check_axis_levels,
     check_degree_range,
+    check_sample_count,
+    check_sweep_rmse,
+    count_distinct_rows,
     max_supported_degree,
 )
 from MomentEmu.MomentEmu import (
@@ -682,24 +689,78 @@ class PolyEmu():
         multi_indices_list = []
         running_time_list = []
         degree_list = []
+        cond_list = []
         import time
+
+        # D16: a k-level axis identifies x_i^d only for d <= k - 1, so drop
+        # multi-indices above the per-axis cap before building Phi. The capped
+        # set stays downward closed; the total degree keeps rising on it.
+        axis_caps, level_counts = check_axis_levels(X_train_scaled)
+        axis_warned = False
+        n_distinct = None
+        D_prev = -1
+        validation_is_training = X_val_scaled is X_train_scaled
+        if validation_is_training:
+            warnings.warn(
+                "the validation set is the training set (cross_validation=False "
+                "without an explicit X_test/Y_test); the in-sample RMSE understates "
+                "the true error and the RMSE_tol early stop is disabled.",
+                UserWarning,
+                stacklevel=2,
+            )
+        stop_reason = "reached max_degree"
 
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
 
-            degree_list.append(d)
             if d == init_deg:
-                multi_indices = generate_multi_indices(self.n_params, d)
+                raw_indices = generate_multi_indices(self.n_params, d)
             else:
                 aux_indices = given_order_indices(self.n_params, d)
-                multi_indices = np.concatenate((multi_indices, aux_indices), axis=0)
+                raw_indices = np.concatenate((multi_indices, aux_indices), axis=0)
 
-            # M, nu = compute_moments_vector_output(X_train_scaled, Y_train_scaled, multi_indices)
-            # Use batched computation
+            candidate_indices = indices_selection(raw_indices, axis_caps)
+            if not axis_warned and candidate_indices.shape[0] < raw_indices.shape[0]:
+                axis_warned = True
+                warnings.warn(
+                    f"grid design detected: per-axis level counts {level_counts.tolist()} "
+                    f"cap each parameter power at {axis_caps.tolist()} (D16); "
+                    f"{raw_indices.shape[0] - candidate_indices.shape[0]} monomial(s) "
+                    f"dropped at degree {d}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if candidate_indices.shape[0] == D_prev:
+                stop_reason = "capped basis stopped growing"
+                break
+            D_prev = candidate_indices.shape[0]
+            multi_indices = candidate_indices
+            D = multi_indices.shape[0]
+
+            check_sample_count(
+                X_train_scaled.shape[0], D, degree=d, n_params=self.n_params
+            )
+            if n_distinct is None:
+                n_distinct = count_distinct_rows(X_train_scaled)
+            if n_distinct <= D:
+                raise InsufficientSamplesError(
+                    f"degree {d}: only {n_distinct} distinct input rows for a basis of "
+                    f"D = {D} terms (N = {X_train_scaled.shape[0]} rows); the polynomial "
+                    f"is unconstrained between the distinct points. Add distinct samples "
+                    f"or lower the degree."
+                )
+
             M, nu = compute_moments_vector_output_batched(
                 X_train_scaled, Y_train_scaled, multi_indices, batch_size=batch_size
             )
-            coeffs = solve_emulator_coefficients(M, nu)
+            coeffs, cond = solve_emulator_coefficients(
+                M, nu, on_singular="warn", degree=d, return_cond=True
+            )
+            if not np.isfinite(coeffs).all():
+                stop_reason = "Cholesky failed"
+                break
+            degree_list.append(d)
+            cond_list.append(float(cond))
 
             # Y_val_pred = evaluate_emulator(X_val_scaled, coeffs, multi_indices)
             Y_val_pred = evaluate_emulator_batched(
@@ -725,21 +786,35 @@ class PolyEmu():
             running_time = end_time - start_time
             running_time_list.append(running_time)
 
-            if RMSE_val < RMSE_tol:
-                self.foward_degree = d
-                print(f"Forward emulator generated with degree {d}, RMSE_val of {RMSE_val}.")
+            if cond >= COND_RAISE and validation_is_training:
+                stop_reason = "cond(M) >= 1e16 with in-sample validation"
                 break
-            if d == max_degree:
-                print(f"Maximum degree {max_degree} reached. Now choose the best fit. ")
-                ind = select_best_model(RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol)
-                # assert RMSE_val_list[ind] < RMSE_upper, "Failed: The best model has RMSE higher than the upper bound."
-                # if RMSE_val_list[ind] > RMSE_upper:
-                #     warning("Warning: The best model has RMSE higher than {}.".format(RMSE_upper))
-                
-                coeffs = coeffs_list[ind]
-                multi_indices = multi_indices_list[ind]
-                self.foward_degree = init_deg + ind
-                print(f"Forward emulator generated with degree {init_deg+ind}, RMSE_val of {RMSE_val_list[ind]}.")
+            if check_sweep_rmse(RMSE_val_list, degree_list):
+                stop_reason = "validation RMSE blow-up"
+                break
+            if (not validation_is_training) and RMSE_val < RMSE_tol:
+                stop_reason = "RMSE_tol met"
+                break
+
+        if not RMSE_val_list:
+            raise IllConditionedError(
+                f"no forward degree in [{init_deg}, {max_degree}] could be fitted; "
+                f"the last stop reason was {stop_reason!r}."
+            )
+        if stop_reason == "reached max_degree":
+            ind = select_best_model(
+                RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol
+            )
+        else:
+            # Early stop (RMSE_tol, blow-up, singular or a frozen capped basis):
+            # keep the lowest finite-RMSE rung fitted so far.
+            finite = np.isfinite(np.asarray(RMSE_val_list, dtype=np.float64))
+            masked = np.where(finite, RMSE_val_list, np.inf)
+            ind = int(np.argmin(masked))
+        coeffs = coeffs_list[ind]
+        multi_indices = multi_indices_list[ind]
+        self.foward_degree = degree_list[ind]
+        self.forward_cond_est_ = cond_list[ind]
 
         if dim_reduction:
             print("Performing dimension reduction...")
@@ -840,19 +915,79 @@ class PolyEmu():
         AIC_list = []
         BIC_list = []
         multi_indices_list = []
+        running_time_list = []
+        degree_list = []
+        cond_list = []
+        import time
+
+        # Same D16 axis cap and sample guards as the forward sweep, with
+        # n = n_outputs because the backward basis is built from Y.
+        axis_caps, level_counts = check_axis_levels(Y_train_scaled)
+        axis_warned = False
+        n_distinct = None
+        D_prev = -1
+        validation_is_training = Y_val_scaled is Y_train_scaled
+        if validation_is_training:
+            warnings.warn(
+                "the backward validation set is the training set "
+                "(cross_validation=False without an explicit X_test/Y_test); the "
+                "in-sample RMSE understates the true error and the RMSE_tol early "
+                "stop is disabled.",
+                UserWarning,
+                stacklevel=2,
+            )
+        stop_reason = "reached max_degree"
 
         for d in range(init_deg, max_degree + 1):
+            start_time = time.time()
             if d == init_deg:
-                multi_indices = generate_multi_indices(self.n_outputs, d)
+                raw_indices = generate_multi_indices(self.n_outputs, d)
             else:
                 aux_indices = given_order_indices(self.n_outputs, d)
-                multi_indices = np.concatenate((multi_indices, aux_indices), axis=0)
-            # M, nu = compute_moments_vector_output(Y_train_scaled, X_train_scaled, multi_indices)
-            # Use batched computation
+                raw_indices = np.concatenate((multi_indices, aux_indices), axis=0)
+
+            candidate_indices = indices_selection(raw_indices, axis_caps)
+            if not axis_warned and candidate_indices.shape[0] < raw_indices.shape[0]:
+                axis_warned = True
+                warnings.warn(
+                    f"grid design detected: per-axis level counts {level_counts.tolist()} "
+                    f"cap each parameter power at {axis_caps.tolist()} (D16); "
+                    f"{raw_indices.shape[0] - candidate_indices.shape[0]} monomial(s) "
+                    f"dropped at degree {d}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if candidate_indices.shape[0] == D_prev:
+                stop_reason = "capped basis stopped growing"
+                break
+            D_prev = candidate_indices.shape[0]
+            multi_indices = candidate_indices
+            D = multi_indices.shape[0]
+
+            check_sample_count(
+                Y_train_scaled.shape[0], D, degree=d, n_params=self.n_outputs
+            )
+            if n_distinct is None:
+                n_distinct = count_distinct_rows(Y_train_scaled)
+            if n_distinct <= D:
+                raise InsufficientSamplesError(
+                    f"degree {d}: only {n_distinct} distinct output rows for a basis of "
+                    f"D = {D} terms (N = {Y_train_scaled.shape[0]} rows); the polynomial "
+                    f"is unconstrained between the distinct points. Add distinct samples "
+                    f"or lower the degree."
+                )
+
             M, nu = compute_moments_vector_output_batched(
                 Y_train_scaled, X_train_scaled, multi_indices, batch_size=batch_size
             )
-            coeffs = solve_emulator_coefficients(M, nu)
+            coeffs, cond = solve_emulator_coefficients(
+                M, nu, on_singular="warn", degree=d, return_cond=True
+            )
+            if not np.isfinite(coeffs).all():
+                stop_reason = "Cholesky failed"
+                break
+            degree_list.append(d)
+            cond_list.append(float(cond))
 
             # X_val_pred = evaluate_emulator(Y_val_scaled, coeffs, multi_indices)
             X_val_pred = evaluate_emulator_batched(
@@ -873,23 +1008,35 @@ class PolyEmu():
 
             coeffs_list.append(coeffs)
             multi_indices_list.append(multi_indices)
+            running_time_list.append(time.time() - start_time)
 
-            if RMSE_val < RMSE_tol:
-                self.backward_degree = d
-                print(f"Backward emulator generated with degree {d}, RMSE_val of {RMSE_val}.")
+            if cond >= COND_RAISE and validation_is_training:
+                stop_reason = "cond(M) >= 1e16 with in-sample validation"
                 break
-            if d == max_degree:
-                warning(f"Maximum degree {max_degree} reached. Now choose the best fit. ")
-                ind = select_best_model(RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol)
-                # assert RMSE_val_list[ind] < RMSE_upper, "Failed: The best model has RMSE higher than the upper bound."
+            if check_sweep_rmse(RMSE_val_list, degree_list):
+                stop_reason = "validation RMSE blow-up"
+                break
+            if (not validation_is_training) and RMSE_val < RMSE_tol:
+                stop_reason = "RMSE_tol met"
+                break
 
-                # if RMSE_val_list[ind] > RMSE_upper:
-                #     warning("Warning: The best model has RMSE higher than {}.".format(RMSE_upper))
-
-                coeffs = coeffs_list[ind]
-                multi_indices = multi_indices_list[ind]
-                self.backward_degree = init_deg + ind
-                print(f"Backward emulator generated with degree {init_deg+ind}, RMSE_val of {RMSE_val_list[ind]}.")
+        if not RMSE_val_list:
+            raise IllConditionedError(
+                f"no backward degree in [{init_deg}, {max_degree}] could be fitted; "
+                f"the last stop reason was {stop_reason!r}."
+            )
+        if stop_reason == "reached max_degree":
+            ind = select_best_model(
+                RMSE_val_list, aic_list=AIC_list, bic_list=BIC_list, rmse_tol=fRMSE_tol
+            )
+        else:
+            finite = np.isfinite(np.asarray(RMSE_val_list, dtype=np.float64))
+            masked = np.where(finite, RMSE_val_list, np.inf)
+            ind = int(np.argmin(masked))
+        coeffs = coeffs_list[ind]
+        multi_indices = multi_indices_list[ind]
+        self.backward_degree = degree_list[ind]
+        self.backward_cond_est_ = cond_list[ind]
 
         if dim_reduction:
             print("Performing dimension reduction...")
@@ -915,6 +1062,8 @@ class PolyEmu():
         self.backward_RMSE_list = RMSE_val_list
         self.backward_AIC_list = AIC_list
         self.backward_BIC_list = BIC_list
+        self.backward_running_time_list = running_time_list
+        self.backward_degree_list = degree_list
 
         pass
 

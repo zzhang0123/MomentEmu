@@ -266,3 +266,24 @@ reflecting the fact that differentiation acts as a numerically unstable operator
   Delta-chi2, and posterior_bias reports the linearised shift in sigma.
 - See CHANGELOG.md for the 2.0.0 default-behaviour changes and deprecations.
 
+
+## Benchmark (2026-02-05, 1-min load 2.5, Apple M3 Ultra)
+
+| row | target | measured |
+|---|---|---|
+| Phi build, N=1, D=462 | < 15 us | 11.7 us (loop 1170 us) |
+| Phi build, N=1, D=3003 | < 40 us | 28.0 us (loop 8485 us) |
+| Phi build, N=20000, D=3003 | < 0.6x loop | 216 ms vs 227 ms = 0.95x (target missed) |
+| forward_emulator single, D=462, m=2000 | < 80 us | 88.7 us (includes the P1.6 box check) |
+| forward_emulator batch 1000, same | < 0.7x loop | 5.32 ms vs 7.61 ms = 0.70x |
+| PolyEmu.jacobian, batch 1, D=462, m=2000 | within 1.3x of 114 us | 268 us |
+| MomentEmu vs poly_normal_eq coefficients | < 1e-11 | 1.7e-14 |
+| symbolic export, one output, D=462 | < 0.1 s | 0.065 s |
+| import MomentEmu median | < 1.0 s | 0.040 s |
+| JAX first-call compile, D=462 | measured once | 0.057 s |
+
+The Phi build rows use the P0.7 plan; the N=20000 wall time is not the
+projected 0.6x in this implementation (the plan projected it from a per-row
+recursion). The single-point and batch-1000 forward targets are met within the
+P1.6 extrapolation check. See PLAN_PROGRESS.md for the full acceptance log.
+

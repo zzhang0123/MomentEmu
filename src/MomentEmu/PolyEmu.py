@@ -10,13 +10,21 @@ from MomentEmu.guards import (
     COND_RAISE,
     IllConditionedError,
     InsufficientSamplesError,
+    as_float64,
     basis_size,
     check_axis_levels,
     check_degree_range,
+    check_design_columns,
+    check_distinct_rows,
+    check_finite,
+    check_log_domain,
     check_sample_count,
     check_sweep_rmse,
+    check_test_pair,
+    check_xy_shapes,
     count_distinct_rows,
     max_supported_degree,
+    resolve_batch_shape,
 )
 from MomentEmu.monomials import (
     MonomialPlan,
@@ -490,6 +498,27 @@ class PolyEmu():
                 stacklevel=2,
             )
 
+        # D1: validate and promote at the entry.  as_float64 rejects object
+        # dtype and warns on float32; check_xy_shapes rejects 1-D Y (with a
+        # reshape hint); check_design_columns raises on constant columns and
+        # warns on collinear ones; check_log_domain rejects Y <= 0 for log_Y.
+        X = as_float64(np.asarray(X), "X")
+        Y = as_float64(np.asarray(Y), "Y")
+        check_finite(X, "X")
+        check_finite(Y, "Y")
+        check_xy_shapes(X, Y)
+        check_test_pair(X_test, Y_test)
+        if X_test is not None:
+            X_test = as_float64(np.asarray(X_test), "X_test")
+            Y_test = as_float64(np.asarray(Y_test), "Y_test")
+            check_finite(X_test, "X_test")
+            check_finite(Y_test, "Y_test")
+        check_design_columns(X)
+        if log_Y:
+            check_log_domain(Y, "Y")
+            if X_test is not None:
+                check_log_domain(Y_test, "Y_test")
+
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
         self.standardize_Y_with_std = standardize_Y_with_std
@@ -498,15 +527,6 @@ class PolyEmu():
 
         if batch_size is None:
             batch_size = X.shape[0]
-
-        # A lone X_test or Y_test is silently ignored by the version below;
-        # reject it so the caller knows the argument did nothing.
-        if (X_test is None) != (Y_test is None):
-            raise ValueError(
-                "X_test and Y_test must both be given or both omitted (got X_test="
-                f"{'None' if X_test is None else 'given'}, Y_test="
-                f"{'None' if Y_test is None else 'given'})"
-            )
 
         if X_test is None or Y_test is None:
             if cross_validation:
@@ -879,24 +899,18 @@ class PolyEmu():
         )
 
     def forward_emulator(self, X, batch_size=None):
-        # Check if the input is float, 1D or 2D
         float_or_int = isinstance(X, (float, int))
-        if float_or_int:
-            X = np.array([[X]])
-        elif isinstance(X, list):
+        if isinstance(X, list):
             X = np.array(X)
-        elif isinstance(X, np.ndarray):
-            pass
         else:
-            raise ValueError(f"Input must be a float, 1D list, or ND numpy array with last axis equal to the number of parameters ({self.n_params})")
-
+            X = np.asarray(X)
+        if X.dtype.kind not in "iuf":
+            raise TypeError(f"X must be numeric, got dtype {X.dtype}")
+        check_finite(X, "X")
         Xshape = X.shape
-        assert Xshape[-1] == self.n_params, f"Input dimension (last axis) must be equal to the number of parameters ({self.n_params})"
-
-        # if dim is not 2, reshape it
-        if X.ndim != 2:
-            X = X.reshape(-1, self.n_params)
-
+        # A 1-D input is one sample only when its length equals n_params; a
+        # trailing-axis mismatch raises instead of silently misreading a batch.
+        X, _single = resolve_batch_shape(X, self.n_params)
         # D1: predict in float64 even when the caller passes int/float32.
         X = np.asarray(X, dtype=np.float64)
         if getattr(self, "forward_plan", None) is None:
@@ -1095,24 +1109,18 @@ class PolyEmu():
 
     def backward_emulator(self, Y, batch_size=None):
         float_or_int = isinstance(Y, (float, int))
-        if float_or_int:
-            Y = np.array([[Y]])
-        elif isinstance(Y, list):
+        if isinstance(Y, list):
             Y = np.array(Y)
-        elif isinstance(Y, np.ndarray):
-            pass
         else:
-            raise ValueError("Input must be a float, 1D list, or ND numpy array")
-
-        if self.log_Y:
-            Y = np.log(Y)
-
+            Y = np.asarray(Y)
+        if Y.dtype.kind not in "iuf":
+            raise TypeError(f"Y must be numeric, got dtype {Y.dtype}")
+        check_finite(Y, "Y")
         Yshape = Y.shape
-        assert Yshape[-1] == self.n_outputs, "Input must have the same number of outputs (i.e., the dimension of the last axis) as the emulator"
-
-        if Y.ndim != 2:
-            Y = Y.reshape(-1, self.n_outputs)
-
+        Y, _single = resolve_batch_shape(Y, self.n_outputs)
+        if self.log_Y:
+            check_log_domain(Y, "Y")
+            Y = np.log(Y)
         Y = np.asarray(Y, dtype=np.float64)
         if getattr(self, "backward_plan", None) is None:
             self._build_backward_plan()

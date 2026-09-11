@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from MomentEmu import guards as g
-from MomentEmu.MomentEmu import select_best_model, solve_emulator_coefficients
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.core import select_best_model, solve_emulator_coefficients
+from MomentEmu.emulator import PolyEmu
 
 
 def test_solve_matches_numpy_on_well_conditioned():

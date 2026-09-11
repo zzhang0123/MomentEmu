@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 
 def _fit(log_Y=False, seed=0):

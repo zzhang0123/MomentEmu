@@ -9,7 +9,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from MomentEmu.PolyEmu import PolyEmu  # noqa: E402
+from MomentEmu.emulator import PolyEmu  # noqa: E402
 
 
 def _mixed_fit(seed=0):
@@ -119,7 +119,7 @@ def test_shipped_te_is_linear():
     reason="companion datasets absent",
 )
 def test_ee_log_beats_linear_at_low_ell():
-    from MomentEmu.PolyEmu import _transform_forward
+    from MomentEmu.emulator import _transform_forward
 
     P = np.load(DATA_DIR / "perturbed_LCDM_params.npy")
     # The first two columns are ell/garbage; the 4049 outputs follow.

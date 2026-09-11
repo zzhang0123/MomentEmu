@@ -9,7 +9,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from MomentEmu.PolyEmu import PolyEmu  # noqa: E402
+from MomentEmu.emulator import PolyEmu  # noqa: E402
 from MomentEmu.jax_momentemu import (  # noqa: E402
     create_jax_emulator,
     log_prior_box,

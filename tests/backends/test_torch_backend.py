@@ -6,7 +6,7 @@ import pytest
 
 import torch
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 from MomentEmu.torch_momentemu import TorchMomentEmu, create_torch_emulator
 
 

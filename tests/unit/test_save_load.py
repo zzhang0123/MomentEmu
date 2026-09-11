@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 
 def _fit(seed=0, log_Y=False, with_std=True, backward=False):
@@ -53,7 +53,7 @@ def test_load_with_only_numpy(tmp_path):
     code = (
         "import sys, numpy as np\n"
         "sys.modules['sklearn'] = None\n"
-        "from MomentEmu.PolyEmu import PolyEmu\n"
+        "from MomentEmu.emulator import PolyEmu\n"
         f"e = PolyEmu.load({str(path)!r})\n"
         "X = np.linspace(-1, 1, 30).reshape(10, 3)\n"
         "print(e.forward_emulator(X).shape)\n"

@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 # Reference values generated on the CI Python 3.12 leg (see the P0.3 commit).
 PIN = {

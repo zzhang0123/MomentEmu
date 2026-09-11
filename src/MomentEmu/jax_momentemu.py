@@ -148,7 +148,7 @@ class JaxEmulator:
                 "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
                 "float64; enable x64 or pass dtype=jnp.float32 explicitly."
             )
-        from MomentEmu.PolyEmu import _normalize_transform, _transform_codes
+        from MomentEmu.emulator import _normalize_transform, _transform_codes
 
         transform = getattr(emulator, "transform", None)
         if transform is None:
@@ -303,7 +303,7 @@ def make_guarded_logdensity(emulator, logprior, *, penalty=1e10):
 
 def demo_jax_autodiff():
     """Demonstrate the JAX backend on a small quadratic emulator."""
-    from MomentEmu.PolyEmu import PolyEmu
+    from MomentEmu.emulator import PolyEmu
 
     jax.config.update("jax_enable_x64", True)
     rng = np.random.default_rng(42)

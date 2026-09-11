@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from MomentEmu.guards import basis_size, max_supported_degree
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 # The round-1 cells in which the old max_order returned D >= N.
 ROUND1_CELLS = [

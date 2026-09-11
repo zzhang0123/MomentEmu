@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from MomentEmu.PolyEmu import evaluate_monomials_lazy
+from MomentEmu.emulator import evaluate_monomials_lazy
 
 from benchmarks.harness import basis_size, fit_polyemu, fit_polyemu_best, fixed_degree_kwargs, time_call, time_inference
 

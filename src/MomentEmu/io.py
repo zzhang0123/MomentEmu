@@ -127,7 +127,7 @@ def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
 
 def load_emulator(path):
     """Load a PolyEmu from a versioned .npz without importing sklearn (P4.2)."""
-    from MomentEmu.PolyEmu import PolyEmu
+    from MomentEmu.emulator import PolyEmu
     from MomentEmu.guards import DomainBox
 
     with np.load(path, allow_pickle=False) as data:

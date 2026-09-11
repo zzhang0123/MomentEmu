@@ -17,8 +17,8 @@ behaviours that motivated the refactor:
 import numpy as np
 import pytest
 
-from MomentEmu.MomentEmu import signal_aware_frac_err
-from MomentEmu.PolyEmu import _report_frac_err
+from MomentEmu.core import signal_aware_frac_err
+from MomentEmu.emulator import _report_frac_err
 
 
 def test_narrow_dr_uses_plain_relative_error() -> None:
@@ -178,7 +178,7 @@ def test_fully_masked_output_column_reported() -> None:
 
 
 def test_nan_in_pred_gives_inf_public_metric() -> None:
-    from MomentEmu.PolyEmu import _public_max_frac_err
+    from MomentEmu.emulator import _public_max_frac_err
 
     ref = np.array([[1.0], [2.0]])
     pred = np.array([[1.0], [np.nan]])

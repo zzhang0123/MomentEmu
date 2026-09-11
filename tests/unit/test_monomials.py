@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import (
+from MomentEmu.emulator import (
     PolyEmu,
     evaluate_monomials_lazy,
     generate_multi_indices,

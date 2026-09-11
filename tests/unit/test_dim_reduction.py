@@ -6,8 +6,8 @@ import warnings
 import numpy as np
 import pytest
 
-from MomentEmu.MomentEmu import filter_modes
-from MomentEmu.PolyEmu import PolyEmu, evaluate_monomials_lazy
+from MomentEmu.core import filter_modes
+from MomentEmu.emulator import PolyEmu, evaluate_monomials_lazy
 
 
 def _data(seed=0, n=3, N=300):

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import importlib
 
-from MomentEmu.PolyEmu import PolyEmu, evaluate_emulator, symbolic_polynomial_expressions
-from MomentEmu.MomentEmu import signal_aware_frac_err
+from MomentEmu.emulator import PolyEmu, evaluate_emulator, symbolic_polynomial_expressions
+from MomentEmu.core import signal_aware_frac_err
 from MomentEmu._stale_check import warn_if_stale
 
 warn_if_stale()
@@ -43,7 +43,7 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_BACKENDS))
 
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Zheng Zhang"
 __all__ = [
     "PolyEmu",

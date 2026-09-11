@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 ARCHIVE = Path("/Users/zzhang/Workspace/MomentEmu-review-2026-09/r2")
 

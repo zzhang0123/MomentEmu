@@ -11,7 +11,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from MomentEmu.PolyEmu import (
+from MomentEmu.emulator import (
     PolyEmu,
     evaluate_monomials_lazy,
     generate_multi_indices,

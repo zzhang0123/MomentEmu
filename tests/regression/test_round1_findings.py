@@ -17,8 +17,8 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 from MomentEmu import guards as g
-from MomentEmu.MomentEmu import select_best_model, solve_emulator_coefficients
-from MomentEmu.PolyEmu import (
+from MomentEmu.core import select_best_model, solve_emulator_coefficients
+from MomentEmu.emulator import (
     PolyEmu,
     evaluate_emulator_batched,
     evaluate_monomials,
@@ -92,7 +92,7 @@ def test_tests_do_not_import_repo_code():
 
 
 def test_autodiff_test_import_stale():
-    from MomentEmu.PolyEmu import PolyEmu as P  # noqa: F401
+    from MomentEmu.emulator import PolyEmu as P  # noqa: F401
     assert callable(P)
 
 
@@ -148,7 +148,7 @@ def test_symb_emu_ignores_log_y(logy_emu):
 
 
 def test_frac_err_masked_column_reports_zero():
-    from MomentEmu.MomentEmu import signal_aware_frac_err
+    from MomentEmu.core import signal_aware_frac_err
 
     ref = np.array([[1.0, 1e-30], [2.0, 2e-30]])
     with warnings.catch_warnings():
@@ -249,15 +249,18 @@ def test_constructor_does_all_work():
     assert hasattr(PolyEmu, "fit") and hasattr(PolyEmu, "predict")
 
 
-@pytest.mark.xfail(strict=True, reason="P4.3 module rename")
 def test_package_self_shadowing():
     import importlib
+    import sys
 
-    with pytest.warns(DeprecationWarning):
-        importlib.import_module("MomentEmu.MomentEmu")
+    # P4.3: the old self-shadowing module names are deprecated aliases.
+    for name in ("MomentEmu.PolyEmu", "MomentEmu.MomentEmu"):
+        sys.modules.pop(name, None)
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            mod = importlib.import_module(name)
+        assert mod is not None
 
 
-@pytest.mark.xfail(strict=True, reason="P4.4 pyproject floor")
 def test_requires_python_3_7_false():
     import tomllib
     from pathlib import Path
@@ -285,7 +288,7 @@ def test_torch_inplace_phi_breaks_vmap(emu):
 
 
 def test_symbolic_expr_unbound_monomial():
-    from MomentEmu.PolyEmu import symbolic_polynomial_expressions
+    from MomentEmu.emulator import symbolic_polynomial_expressions
 
     expr = symbolic_polynomial_expressions(np.ones((3, 1)), np.array([[0, 0], [1, 0], [0, 2]]))
     assert expr
@@ -312,7 +315,7 @@ def test_x_test_without_y_test_ignored():
 
 
 def test_nan_defeats_frac_err_gate():
-    from MomentEmu.PolyEmu import _public_max_frac_err
+    from MomentEmu.emulator import _public_max_frac_err
 
     ref = np.array([[1.0], [2.0]])
     diag = __import__("MomentEmu").signal_aware_frac_err(np.array([[1.0], [np.nan]]), ref)
@@ -354,7 +357,7 @@ def test_assert_for_user_input_validation():
 
 
 def test_metrics_and_penalties_dead_and_aicc_invalid():
-    import MomentEmu.MomentEmu as core
+    import MomentEmu.core as core
 
     assert not hasattr(core, "metrics_and_penalties")
 
@@ -405,9 +408,10 @@ def test_no_sample_weighting():
     assert "weights" in inspect.signature(PolyEmu).parameters
 
 
-@pytest.mark.xfail(strict=True, reason="P4.2 npz save/load")
 def test_no_output_basis_reduction():
+    # P4.2: persistence now ships as a versioned .npz.
     assert hasattr(PolyEmu, "save") and hasattr(PolyEmu, "load")
+    assert hasattr(PolyEmu, "fingerprint")
 
 
 @pytest.mark.xfail(strict=True, reason="P5.8 backward PCA")
@@ -441,12 +445,11 @@ def test_solve_redone_each_degree_no_cholesky():
 
 @pytest.mark.xfail(strict=True, reason="P4.7 rmse rename")
 def test_predictive_mse_returns_rmse():
-    import MomentEmu.MomentEmu as core
+    import MomentEmu.core as core
 
     assert hasattr(core, "predictive_rmse_aic_bic")
 
 
-@pytest.mark.xfail(strict=True, reason="P4.4 LICENSE")
 def test_license_missing_mit_attribution_clause():
     from pathlib import Path
 
@@ -464,7 +467,7 @@ def test_readme_jax_example_import_broken():
 def test_sympy_simplify_wasted_in_symbolic_export():
     from pathlib import Path
 
-    assert "sp.simplify" not in Path("src/MomentEmu/PolyEmu.py").read_text()
+    assert "sp.simplify" not in Path("src/MomentEmu/emulator.py").read_text()
 
 
 def test_notebook_test_uses_removed_parameter():
@@ -483,7 +486,7 @@ def test_batch_size_default_disables_batching():
 
 
 def test_filter_modes_joint_drop_no_control():
-    from MomentEmu.MomentEmu import filter_modes
+    from MomentEmu.core import filter_modes
 
     with pytest.warns(DeprecationWarning):
         filter_modes(np.ones((2, 1)), np.eye(2))

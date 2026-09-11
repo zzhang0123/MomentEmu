@@ -1,34 +1,32 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "MomentEmu"
-version = "1.0.0"
+version = "2.0.0"
 description = "A lightweight, interpretable polynomial emulator with auto-differentiation support"
 authors = [ { name = "Zheng Zhang", email = "zheng_zhang1@alumni.brown.edu" } ]
 readme = "README.md"
-license = { file = "LICENSE" }
-requires-python = ">=3.7"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
 dependencies = [
-	"numpy",
-	"scipy",
-	"sympy",
-	"scikit-learn"
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "sympy>=1.13",
+    "scikit-learn>=1.3",
 ]
 keywords = ["emulator", "polynomial", "interpolation", "machine-learning", "scientific-computing", "autodiff"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Scientific/Engineering :: Physics",
@@ -44,12 +42,26 @@ Documentation = "https://zzhang0123.github.io/MomentEmu/"
 where = ["src"]
 
 [project.optional-dependencies]
-jax = ["jax", "jaxlib"]
-torch = ["torch"]
-autodiff = ["jax", "jaxlib", "torch"]
-all = ["jax", "jaxlib", "torch", "matplotlib"]
-docs = ["mkdocs", "mkdocs-material", "mkdocstrings[python]", "pymdown-extensions"]
-dev = ["pytest", "pytest-cov", "black", "isort", "flake8", "mypy", "pre-commit"]
+jax = ["jax>=0.4", "jaxlib"]
+torch = ["torch>=2.0"]
+all = ["jax>=0.4", "jaxlib", "torch>=2.0"]
+docs = ["mkdocs>=1.5", "mkdocs-material>=9", "mkdocstrings[python]>=0.24", "pymdown-extensions>=10"]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+    "pytest-timeout>=2",
+    "hypothesis>=6",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "build>=1.0",
+    "twine>=5",
+    "nbmake>=1.5",
+    "cffconvert>=2",
+    "mkdocs>=1.5",
+    "mkdocs-material>=9",
+    "mkdocstrings[python]>=0.24",
+    "pymdown-extensions>=10",
+]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
@@ -57,6 +69,9 @@ addopts = "--import-mode=importlib -p no:cacheprovider"
 markers = [
     "slow: takes more than ~5 s; deselect with -m 'not slow'",
     "backend(name): requires the optional jax/torch extra",
+]
+filterwarnings = [
+    "error::DeprecationWarning:MomentEmu",
 ]
 [tool.coverage.run]
 source = ["MomentEmu"]

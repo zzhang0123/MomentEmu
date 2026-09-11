@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu, refit_zoom
+from MomentEmu.emulator import PolyEmu, refit_zoom
 
 
 def _sim(X):

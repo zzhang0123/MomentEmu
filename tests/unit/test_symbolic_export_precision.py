@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import sympy as sp
 
-from MomentEmu.PolyEmu import PolyEmu, generate_multi_indices, symbolic_polynomial_expressions
+from MomentEmu.emulator import PolyEmu, generate_multi_indices, symbolic_polynomial_expressions
 
 
 LO = np.array([0.019, 0.09, 60.0, 0.90, 2.9, 0.03])

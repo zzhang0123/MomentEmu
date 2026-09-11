@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from MomentEmu import guards as g
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 
 def _good(n=200, seed=0):
@@ -98,7 +98,7 @@ def test_predict_rejects_non_finite_and_bad_shape():
 def test_python_O_keeps_validation():
     code = (
         "import numpy as np, sys; sys.path.insert(0, 'src'); "
-        "from MomentEmu.PolyEmu import PolyEmu; "
+        "from MomentEmu.emulator import PolyEmu; "
         "X = np.zeros((50, 2)); X[:, 1] = np.arange(50); Y = X[:, 1:2]; "
         "\ntry:\n    PolyEmu(X, Y, max_degree_forward=2)\n"
         "except ValueError as e:\n    print('ValueError'); \n"

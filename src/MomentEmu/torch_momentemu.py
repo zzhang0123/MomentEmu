@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from MomentEmu.PolyEmu import _transform_codes
+from MomentEmu.emulator import _transform_codes
 from MomentEmu.guards import output_scale
 from MomentEmu.monomials import MonomialPlan
 
@@ -127,7 +127,7 @@ def create_torch_emulator(trained_emulator, dtype=torch.float64):
 
 def demo_torch_autodiff():
     """Demonstrate PyTorch gradients on a small quadratic emulator."""
-    from MomentEmu.PolyEmu import PolyEmu
+    from MomentEmu.emulator import PolyEmu
 
     rng = np.random.default_rng(42)
     X = rng.uniform(-1, 1, (200, 3))

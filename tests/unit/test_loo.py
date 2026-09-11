@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 from scipy.linalg import cho_factor, solve_triangular
 
-from MomentEmu.MomentEmu import press_loo
-from MomentEmu.PolyEmu import PolyEmu, evaluate_monomials_lazy, generate_multi_indices
+from MomentEmu.core import press_loo
+from MomentEmu.emulator import PolyEmu, evaluate_monomials_lazy, generate_multi_indices
 
 
 def _design(seed=0, N=120, n=2, d=5):

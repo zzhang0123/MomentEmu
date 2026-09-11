@@ -13,8 +13,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from MomentEmu.MomentEmu import signal_aware_frac_err
-from MomentEmu.PolyEmu import PolyEmu, evaluate_monomials_lazy
+from MomentEmu.core import signal_aware_frac_err
+from MomentEmu.emulator import PolyEmu, evaluate_monomials_lazy
 
 
 # ----------------------------------------------------------------------------

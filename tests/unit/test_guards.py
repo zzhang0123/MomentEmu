@@ -16,8 +16,8 @@ import pytest
 
 
 from MomentEmu import guards as g  # noqa: E402
-from MomentEmu.MomentEmu import generate_moment_products  # noqa: E402
-from MomentEmu.PolyEmu import evaluate_monomials_lazy, generate_multi_indices, max_order  # noqa: E402
+from MomentEmu.core import generate_moment_products  # noqa: E402
+from MomentEmu.emulator import evaluate_monomials_lazy, generate_multi_indices, max_order  # noqa: E402
 
 RNG = np.random.default_rng(20260910)
 
@@ -611,7 +611,7 @@ def test_sweep_blowup_reproduced_end_to_end_N200_n2():
     checked that the guards fire: check_sample_count raises at d=17,
     check_sweep_rmse warns on the ratio.
     """
-    from MomentEmu.MomentEmu import solve_emulator_coefficients
+    from MomentEmu.core import solve_emulator_coefficients
 
     rng = np.random.default_rng(3)
     X = rng.uniform(-1, 1, (200, 2))

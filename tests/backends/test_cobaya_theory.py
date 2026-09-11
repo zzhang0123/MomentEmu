@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 
-from MomentEmu.PolyEmu import PolyEmu
+from MomentEmu.emulator import PolyEmu
 
 
 def test_importing_momentemu_does_not_import_cobaya():

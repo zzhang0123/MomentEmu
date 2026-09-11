@@ -1030,6 +1030,29 @@ class PolyEmu():
         h = np.einsum("ij,ij->j", A, A) / self.forward_N_train_
         return float(h[0]) if h.size == 1 else h
 
+    def jacobian(self, X, batch_size=None):
+        """Analytic dY/dX of the forward emulator (P2.2).
+
+        Returns (N, m, n) for an (N, n) input, or (m, n) for a single point.
+        d phi_alpha / d z_i = alpha_i * z^(alpha - e_i), so all n derivative
+        blocks come from one closure build and one batched GEMM with the
+        folded coefficients.
+        """
+        arr = np.asarray(X, dtype=np.float64)
+        single = arr.ndim == 1
+        arr = np.atleast_2d(arr)
+        self._check_box(arr, self.X_box_, "ignore", "input")
+        if getattr(self, "forward_plan", None) is None:
+            self._build_forward_plan()
+        Xs = (arr - self.scaler_X.mean_) * self._inv_scale_X
+        dPhi = self.forward_plan.evaluate_derivatives(Xs)  # (n, N, D)
+        J = dPhi @ self.forward_coeffs_folded               # (n, N, m)
+        J = J.transpose(1, 2, 0) / self.scaler_X.scale_[None, None, :]
+        if self.log_Y:
+            Y_affine = self.forward_plan.evaluate(Xs) @ self.forward_coeffs_folded
+            J = J * np.exp(Y_affine)[:, :, None]
+        return J[0] if single else J
+
     def _check_box(self, X, box: DomainBox, extrapolation: str, label: str) -> None:
         if extrapolation not in ("warn", "raise", "ignore"):
             raise ValueError(

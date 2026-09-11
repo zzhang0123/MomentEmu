@@ -60,6 +60,9 @@ class MonomialPlan:
         Row indices of each total degree 1, 2, ... in ``closure``.
     select : (D, ) int64
         Row of ``closure`` that each requested multi-index maps to.
+    deriv_parent : (D_closure, n) int64
+        Row of ``closure`` holding alpha - e_i, or -1 when alpha_i == 0,
+        used for the analytic Jacobian (P2.2).
     n_closure : int
     n_terms : int
     """
@@ -69,6 +72,7 @@ class MonomialPlan:
     var: np.ndarray
     levels: list
     select: np.ndarray
+    deriv_parent: np.ndarray
 
     @property
     def n_closure(self) -> int:
@@ -104,7 +108,22 @@ class MonomialPlan:
         dmax = int(degree.max()) if D else 0
         levels = [np.flatnonzero(degree == ell) for ell in range(1, dmax + 1)]
         select = np.array([index[tuple(int(v) for v in row)] for row in mi], dtype=np.int64)
-        return cls(closure=closure, parent=parent, var=var, levels=levels, select=select)
+        n = closure.shape[1]
+        deriv_parent = np.full((D, n), -1, dtype=np.int64)
+        for j, row in enumerate(closure):
+            for i in range(n):
+                if row[i]:
+                    p = row.copy()
+                    p[i] -= 1
+                    deriv_parent[j, i] = index[tuple(int(v) for v in p)]
+        return cls(
+            closure=closure,
+            parent=parent,
+            var=var,
+            levels=levels,
+            select=select,
+            deriv_parent=deriv_parent,
+        )
 
     def evaluate(self, X_scaled: np.ndarray) -> np.ndarray:
         """Return (N, D) monomials of the requested indices, in input order.
@@ -131,6 +150,35 @@ class MonomialPlan:
             buf[level] = buf[self.parent[level]] * xT[self.var[level]]
         # buf is (D_closure, N): return the (N, D) transpose the caller uses.
         return np.ascontiguousarray(buf[self.select].T)
+
+    def evaluate_derivatives(self, X_scaled: np.ndarray) -> np.ndarray:
+        """Return (n, N, D) dPhi/dz over the requested rows (P2.2).
+
+        d phi_alpha / d z_i = alpha_i * z^(alpha - e_i), so every column is a
+        scaled lower monomial already present in the closure. The caller
+        divides by the input scale to get d/dx and contracts with C.
+        """
+        X = np.asarray(X_scaled)
+        if X.ndim != 2:
+            X = X.reshape(-1, self.closure.shape[1])
+        X = np.ascontiguousarray(X, dtype=np.float64)
+        N = X.shape[0]
+        buf = np.empty((self.n_closure, N), dtype=np.float64)
+        if self.n_closure:
+            buf[0] = 1.0
+        xT = np.ascontiguousarray(X.T)
+        for level in self.levels:
+            buf[level] = buf[self.parent[level]] * xT[self.var[level]]
+        n = self.closure.shape[1]
+        requested = self.closure[self.select]
+        dp = self.deriv_parent[self.select]
+        out = np.zeros((n, N, self.select.shape[0]), dtype=np.float64)
+        for i in range(n):
+            valid = dp[:, i] >= 0
+            if valid.any():
+                block = out[i]
+                block[:, valid] = buf[dp[valid, i]].T * requested[valid, i][None, :]
+        return out
 
 
 def evaluate_monomials_fast(

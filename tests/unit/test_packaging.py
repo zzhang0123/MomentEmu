@@ -1,8 +1,9 @@
 """P4.4: packaging metadata, LICENSE and version."""
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 import MomentEmu
 

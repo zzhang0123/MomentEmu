@@ -1,10 +1,9 @@
 """P2.5a: guarded JAX potential (finite, zero-gradient outside the box)."""
 from __future__ import annotations
 
+import jax
 import numpy as np
 import pytest
-
-import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402

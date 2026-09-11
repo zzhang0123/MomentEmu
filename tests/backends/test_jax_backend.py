@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import pickle
 
+import jax
 import numpy as np
 import pytest
-
-import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
@@ -14,7 +13,6 @@ import jax.numpy as jnp  # noqa: E402
 from MomentEmu.emulator import (
     PolyEmu,
     evaluate_monomials_lazy,
-    generate_multi_indices,
 )
 from MomentEmu.jax_momentemu import JaxEmulator, create_jax_emulator  # noqa: E402
 

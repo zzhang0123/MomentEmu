@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import importlib
 
-from MomentEmu.emulator import PolyEmu, evaluate_emulator, symbolic_polynomial_expressions
-from MomentEmu.core import signal_aware_frac_err
 from MomentEmu._stale_check import warn_if_stale
+from MomentEmu.core import signal_aware_frac_err
+from MomentEmu.emulator import PolyEmu, evaluate_emulator, symbolic_polynomial_expressions
 
 warn_if_stale()
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from benchmarks.harness import accuracy, cond_M, fit_polyemu, fixed_degree_kwargs
-from benchmarks.targets import TARGETS, cmb_like, gauss_peak, ishigami, sobol_g, friedman
+from benchmarks.targets import TARGETS, cmb_like, friedman, ishigami, sobol_g
 
 
 def _map2(X):

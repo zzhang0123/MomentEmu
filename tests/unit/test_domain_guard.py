@@ -6,8 +6,8 @@ import warnings
 import numpy as np
 import pytest
 
-from MomentEmu.guards import ExtrapolationWarning
 from MomentEmu.emulator import PolyEmu
+from MomentEmu.guards import ExtrapolationWarning
 
 
 def _fit_box(n=3, N=400, seed=0, degree=3):

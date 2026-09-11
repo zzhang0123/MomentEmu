@@ -6,7 +6,6 @@ RMSE increase, (c) a 35 % fit-time regression, (d) a D_final change.
 """
 from __future__ import annotations
 
-import copy
 import io
 import os
 import shutil

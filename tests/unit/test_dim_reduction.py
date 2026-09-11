@@ -63,8 +63,8 @@ def test_filter_modes_warns():
 
 
 def test_rosenbrock_default_is_exact():
-    from benchmarks.targets import TARGETS
     from benchmarks.harness import accuracy, fixed_degree_kwargs
+    from benchmarks.targets import TARGETS
 
     t = TARGETS["rosenbrock"]
     X, Y, Xt, Yt = t.data()

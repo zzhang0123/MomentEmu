@@ -9,7 +9,7 @@ from MomentEmu.emulator import (
     evaluate_monomials_lazy,
     generate_multi_indices,
 )
-from MomentEmu.monomials import MonomialPlan, evaluate_monomials_fast
+from MomentEmu.monomials import evaluate_monomials_fast
 
 
 def _index_set(n: int, D: int) -> np.ndarray:

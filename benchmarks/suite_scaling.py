@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from benchmarks.harness import (
+    basis_size,
+    fit_polyemu,
+    fit_polyemu_best,
+    fixed_degree_kwargs,
+    time_call,
+    time_inference,
+)
 from MomentEmu.emulator import evaluate_monomials_lazy
-
-from benchmarks.harness import basis_size, fit_polyemu, fit_polyemu_best, fixed_degree_kwargs, time_call, time_inference
 
 D_CAP = 5000
 N_FIT = 10000

@@ -84,3 +84,35 @@ exclude_also = [
     "if __name__ == .__main__.:",
     "def demo_.*:",
 ]
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "E741", "B905", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "E402", "E702", "B023", "F841"]
+"benchmarks/**" = ["E402", "E702", "B023", "B007", "F841"]
+"examples/**" = ["F841", "B007"]
+
+[tool.mypy]
+python_version = "3.10"
+files = [
+    "src/MomentEmu/__init__.py",
+    "src/MomentEmu/emulator.py",
+    "src/MomentEmu/core.py",
+    "src/MomentEmu/io.py",
+    "src/MomentEmu/monomials.py",
+    "src/MomentEmu/guards.py",
+    "src/MomentEmu/_stale_check.py",
+]
+warn_unused_ignores = true
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["sklearn.*", "sympy.*", "jax.*", "torch.*", "scipy.*", "cobaya.*", "getdist.*"]
+ignore_missing_imports = true

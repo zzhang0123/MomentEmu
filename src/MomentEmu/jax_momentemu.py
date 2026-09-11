@@ -148,7 +148,7 @@ class JaxEmulator:
                 "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
                 "float64; enable x64 or pass dtype=jnp.float32 explicitly."
             )
-        from MomentEmu.emulator import _normalize_transform, _transform_codes
+        from MomentEmu.emulator import _transform_codes
 
         transform = getattr(emulator, "transform", None)
         if transform is None:

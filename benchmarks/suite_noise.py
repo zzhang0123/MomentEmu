@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import statistics
 
-import numpy as np
-
 from benchmarks.harness import fit_polyemu, fixed_degree_kwargs, time_inference
 from benchmarks.targets import TARGETS
 

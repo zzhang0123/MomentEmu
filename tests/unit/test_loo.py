@@ -1,8 +1,6 @@
 """P1.5: exact LOO/PRESS selection on all N."""
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pytest
 from scipy.linalg import cho_factor, solve_triangular

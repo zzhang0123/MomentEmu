@@ -87,7 +87,7 @@ class MonomialPlan:
         return int(self.closure.sum(axis=1).max()) if self.n_closure else 0
 
     @classmethod
-    def build(cls, multi_indices: np.ndarray) -> "MonomialPlan":
+    def build(cls, multi_indices: np.ndarray) -> MonomialPlan:
         mi = np.asarray(multi_indices, dtype=np.int64)
         if mi.ndim != 2:
             raise ValueError(f"multi_indices must be 2-D, got shape {mi.shape}")

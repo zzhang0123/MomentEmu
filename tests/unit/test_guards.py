@@ -14,7 +14,6 @@ import warnings
 import numpy as np
 import pytest
 
-
 from MomentEmu import guards as g  # noqa: E402
 from MomentEmu.core import generate_moment_products  # noqa: E402
 from MomentEmu.emulator import evaluate_monomials_lazy, generate_multi_indices, max_order  # noqa: E402

@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import logging
 import warnings
-from itertools import combinations_with_replacement
 from collections import Counter
+from itertools import combinations_with_replacement
+from typing import Any
 
 import numpy as np
+
+from MomentEmu.core import (
+    generate_moment_products,
+    predictive_rmse_aic_bic,
+    press_loo,
+    select_best_model,
+    signal_aware_frac_err,
+    solve_emulator_coefficients,
+)
 from MomentEmu.guards import (
     COND_RAISE,
     DomainBox,
@@ -17,9 +27,7 @@ from MomentEmu.guards import (
     check_axis_levels,
     check_degree_range,
     check_design_columns,
-    check_distinct_rows,
     check_finite,
-    check_in_domain,
     check_log_domain,
     check_sample_count,
     check_sweep_rmse,
@@ -34,14 +42,6 @@ from MomentEmu.guards import (
 from MomentEmu.monomials import (
     MonomialPlan,
     fold_output_affine,
-)
-from MomentEmu.core import (
-    generate_moment_products,
-    press_loo,
-    solve_emulator_coefficients,
-    predictive_mse_aic_bic,
-    select_best_model,
-    signal_aware_frac_err,
 )
 
 # Memory budget for a backward-sweep moment matrix M (D x D float64). The
@@ -176,7 +176,7 @@ def refit_zoom(
 
 def given_order_indices(n, d):
     """Generate all multi-indices α with total degree = d.
-    
+
     Args:
         n: number of variables
         d: total degree
@@ -186,14 +186,14 @@ def given_order_indices(n, d):
     """
     indices = []
     for c in combinations_with_replacement(range(n), d):
-        counter = Counter(c)
+        counter: dict[int, int] = Counter(c)
         alpha = [counter[i] for i in range(n)]
         indices.append(tuple(alpha))
     return np.array(indices)
 
 def generate_multi_indices(n, d):
     """Generate all multi-indices α with total degree ≤ d.
-    
+
     Args:
         n: number of variables
         d: total degree
@@ -211,45 +211,45 @@ def generate_multi_indices(n, d):
 
 def indices_selection(multi_indices, d_vec):
     """Select multi-indices where each component is ≤ corresponding component in d_vec.
-    
+
     Args:
         multi_indices: array of multi-indices (each row is a multi-index)
         d_vec: vector of maximum degrees for each variable
-        
+
     Returns:
         filtered array of multi-indices
     """
     # Convert to numpy array if not already
     multi_indices = np.array(multi_indices)
     d_vec = np.array(d_vec)
-    
+
     # Check each multi-index: all components must be ≤ corresponding d_vec components
     mask = np.all(multi_indices <= d_vec, axis=1)
-    
+
     return multi_indices[mask]
 
 def generate_multi_indices_with_degree_vec(d_vec):
     """Generate all multi-indices α where α[i] ≤ d_vec[i] for each variable i.
-    
+
     Args:
         d_vec: vector of maximum degrees for each variable
-        
+
     Returns:
         array of multi-indices
     """
     from itertools import product
-    
+
     # Convert to numpy array if not already
     d_vec = np.array(d_vec)
     n = len(d_vec)
-    
+
     # Generate all combinations using Cartesian product
     # For each variable i, generate range(0, d_vec[i] + 1)
     ranges = [range(d_vec[i] + 1) for i in range(n)]
-    
+
     # Use itertools.product to get all combinations
     indices = list(product(*ranges))
-    
+
     return np.array(indices)
 
 ####### Monomial/Polynomial functions ############
@@ -268,10 +268,10 @@ def evaluate_monomials_lazy(X, multi_indices):
     """
     N, n = X.shape
     D = len(multi_indices)
-    
+
     # Cache only needed powers: (i, d) -> X[:, i] ** d
     power_cache = {}
-    
+
     Phi = np.empty((N, D), dtype=X.dtype)
     for j, alpha in enumerate(multi_indices):
         phi_j = np.ones(N, dtype=X.dtype)
@@ -287,10 +287,11 @@ def evaluate_monomials_lazy(X, multi_indices):
 
 ######## New method for solving the memory issue #########
 def evaluate_monomials_batched(X, multi_indices, batch_size=10000, function=evaluate_monomials_lazy):
+    """Batched wrapper around evaluate_monomials_lazy to limit peak memory."""
     N, n = X.shape
     D = len(multi_indices)
     Phi = np.empty((N, D), dtype=X.dtype)
-    
+
     for i in range(0, N, batch_size):
         batch_end = min(i + batch_size, N)
         Phi[i:batch_end] = evaluate_monomials_lazy(X[i:batch_end], multi_indices)
@@ -306,7 +307,6 @@ def compute_moments_vector_output(X, Y, multi_indices):
     multi_indices: list of multi-indices
     Returns: moment matrix Mm (D x D), moment vectors ν (D x m)
     """
-    n = X.shape[1]
 
     Phi = evaluate_monomials_lazy(X, multi_indices)  # N x D
 
@@ -317,48 +317,47 @@ def compute_moments_vector_output(X, Y, multi_indices):
 def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000):
     """
     Memory-efficient version of moment computation using batched processing.
-    
+
     Args:
         X: N x n input parameter array
-        Y: N x m observable array  
+        Y: N x m observable array
         multi_indices: list of multi-indices
         batch_size: number of samples to process at once
-        
+
     Returns:
         Mm: moment matrix (D x D)
         nu: moment vectors (D x m)
-    """     
+    """
     N, n = X.shape
     m = Y.shape[1]
     D = len(multi_indices)
-    
+
     # Initialize accumulators
     Mm = np.zeros((D, D), dtype=X.dtype)
     nu = np.zeros((D, m), dtype=X.dtype)
-    
+
     # Process data in batches
     for start_idx in range(0, N, batch_size):
         end_idx = min(start_idx + batch_size, N)
-        batch_size_actual = end_idx - start_idx
-        
+
         # Evaluate monomials for this batch
         X_batch = X[start_idx:end_idx]
         Y_batch = Y[start_idx:end_idx]
         Phi_batch = evaluate_monomials_lazy(X_batch, multi_indices)  # batch_size x D
-        
+
         # Accumulate moment matrix: M += Phi_batch.T @ Phi_batch
         Mm += Phi_batch.T @ Phi_batch
-        
+
         # Accumulate moment vector: nu += Phi_batch.T @ Y_batch
         nu += Phi_batch.T @ Y_batch
-        
+
         # Clear batch from memory
         del Phi_batch, X_batch, Y_batch
-    
+
     # Normalize by total number of samples
     Mm /= N
     nu /= N
-    
+
     return Mm, nu
 
 def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
@@ -418,7 +417,7 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
         ) / sp.Float(float(input_std[i]), 17)
     expressions = []
     for j in range(m):
-        terms = {}
+        terms: dict = {}
         for c, alpha in zip(coeffs[:, j], mi):
             key = tuple(int(a) for a in alpha)
             terms[key] = terms.get(key, sp.Integer(0)) + sp.Float(float(c), 17)
@@ -465,14 +464,14 @@ def evaluate_emulator_batched(X, coeffs, multi_indices, batch_size=10000):
     N = X.shape[0]
     m = coeffs.shape[1]
     Y_pred = np.empty((N, m), dtype=X.dtype)
-    
+
     for start_idx in range(0, N, batch_size):
         end_idx = min(start_idx + batch_size, N)
         X_batch = X[start_idx:end_idx]
         Phi_batch = evaluate_monomials_lazy(X_batch, multi_indices)
         Y_pred[start_idx:end_idx] = Phi_batch @ coeffs
         del Phi_batch, X_batch
-    
+
     return Y_pred
 
 def max_order(n_params, N_samples):
@@ -578,7 +577,8 @@ def _report_frac_err(
     return diag
 
 
-class PolyEmu():
+class PolyEmu:
+    """Polynomial moment-projection emulator; see __init__ for the arguments."""
     # Validation diagnostics, populated only when return_max_frac_err=True.
     # Class-level defaults make these attributes safe to read unconditionally
     # (returns None instead of AttributeError when the diagnostic was not
@@ -604,20 +604,20 @@ class PolyEmu():
         self.forward_degree = value
 
     def __init__(self,
-                X, 
-                Y, 
-                X_test=None, 
-                Y_test=None, 
+                X,
+                Y,
+                X_test=None,
+                Y_test=None,
                 log_Y=False,
                 cross_validation=None,
-                test_size=0.15, 
+                test_size=0.15,
                 # RMSE_upper=1.0,
-                RMSE_tol=1e-2, 
+                RMSE_tol=1e-2,
                 fRMSE_tol=1e-1,
-                forward=True, 
+                forward=True,
                 backward=False,
-                init_deg_forward=None,  
-                init_deg_backward=None, 
+                init_deg_forward=None,
+                init_deg_backward=None,
                 max_degree_forward=None,
                 max_degree_backward=None,
                 dim_reduction=False,
@@ -686,7 +686,7 @@ class PolyEmu():
         See :func:`signal_aware_frac_err` for the diagnostic's
         parameter calibration and the meaning of each dict key.
         """
-        
+
         # Imported here, not at module scope, so `import MomentEmu` and the
         # numpy-only inference path do not pay for sklearn (P0.9).
         from sklearn.preprocessing import StandardScaler
@@ -781,8 +781,8 @@ class PolyEmu():
         self.scaler_Y = StandardScaler(with_std=self.standardize_Y_with_std)
 
         # in-place scaling transformation
-        X_train = self.scaler_X.fit_transform(X_train) 
-        Y_train = self.scaler_Y.fit_transform(Y_train) 
+        X_train = self.scaler_X.fit_transform(X_train)
+        Y_train = self.scaler_Y.fit_transform(Y_train)
         # Cached inverses for the folded inference path (P0.7). X is always
         # standardized with std; Y may have scale_ = None (with_std=False).
         self._inv_scale_X = 1.0 / self.scaler_X.scale_
@@ -825,14 +825,14 @@ class PolyEmu():
                     )
 
             self.generate_forward_emulator(
-                X_train, 
+                X_train,
                 Y_train,
                 X_val,
                 Y_val,
                 # RMSE_upper=RMSE_upper,
-                RMSE_tol=RMSE_tol, 
+                RMSE_tol=RMSE_tol,
                 fRMSE_tol=fRMSE_tol,
-                init_deg=init_deg_forward, 
+                init_deg=init_deg_forward,
                 max_degree=max_degree_forward,
                 dim_reduction=dim_reduction,
                 per_mode_thres=per_mode_thres,
@@ -897,14 +897,14 @@ class PolyEmu():
                         f"{MAX_BACKWARD_MOMENT_BYTES / 2**30:.1f} GiB."
                     )
 
-            self.generate_backward_emulator(X_train, 
+            self.generate_backward_emulator(X_train,
                                             Y_train,
                                             X_val,
                                             Y_val,
                                             # RMSE_upper=RMSE_upper,
-                                            RMSE_tol=RMSE_tol, 
+                                            RMSE_tol=RMSE_tol,
                                             fRMSE_tol=fRMSE_tol,
-                                            init_deg=init_deg_backward, 
+                                            init_deg=init_deg_backward,
                                             max_degree=max_degree_backward,
                                             dim_reduction=dim_reduction,
                                             per_mode_thres=per_mode_thres,
@@ -921,20 +921,21 @@ class PolyEmu():
                 self.backward_frac_err_diag = diag
                 self.backward_max_frac_err = _public_max_frac_err(diag)
 
-    def generate_forward_emulator(self, 
-                                  X_train_scaled, 
+    def generate_forward_emulator(self,
+                                  X_train_scaled,
                                   Y_train_scaled,
                                   X_val_scaled,
                                   Y_val_scaled,
                                 #   RMSE_upper=0.1,
-                                  RMSE_tol=1e-3, 
-                                  fRMSE_tol=1e-1, 
-                                  init_deg=None, 
+                                  RMSE_tol=1e-3,
+                                  fRMSE_tol=1e-1,
+                                  init_deg=None,
                                   max_degree=None,
                                   dim_reduction=False,
                                   per_mode_thres=None,
                                   batch_size=10000,
                                   loo=False):
+        """Fit the forward degree sweep (internal; normally called by the constructor)."""
 
         if init_deg is None:
             if self.n_params > 6:
@@ -960,7 +961,6 @@ class PolyEmu():
         running_time_list = []
         degree_list = []
         cond_list = []
-        loo_list = []
         loo_per_output_list = []
         leverage_list = []
         import time
@@ -982,6 +982,7 @@ class PolyEmu():
                 stacklevel=2,
             )
         stop_reason = "reached max_degree"
+        multi_indices = None
         # Scale-free RMSE_tol (P1.4): compare against the RMS of the
         # validation Y in the same space, so rescaling the data with
         # with_std=False does not change the selected degree.
@@ -996,6 +997,7 @@ class PolyEmu():
                 raw_indices = generate_multi_indices(self.n_params, d)
             else:
                 aux_indices = given_order_indices(self.n_params, d)
+                assert multi_indices is not None
                 raw_indices = np.concatenate((multi_indices, aux_indices), axis=0)
 
             candidate_indices = indices_selection(raw_indices, axis_caps)
@@ -1064,7 +1066,7 @@ class PolyEmu():
                 Y_val_pred = evaluate_emulator_batched(
                     X_val_scaled, coeffs, multi_indices, batch_size=batch_size
                 )
-                RMSE_val, AIC, BIC = predictive_mse_aic_bic(
+                RMSE_val, AIC, BIC = predictive_rmse_aic_bic(
                     Y_val_scaled, Y_val_pred, multi_indices.shape[0],
                     n_train=X_train_scaled.shape[0],
                 )
@@ -1460,6 +1462,7 @@ class PolyEmu():
         return t
 
     def forward_emulator(self, X, batch_size=None, extrapolation="warn", return_std=False):
+        """Evaluate the fitted forward emulator at X (see the class docstring)."""
         float_or_int = isinstance(X, (float, int))
         if isinstance(X, list):
             X = np.array(X)
@@ -1495,7 +1498,7 @@ class PolyEmu():
                 axis=0,
             )
         transform = self._transforms()
-        std = None
+        std: Any = None
         if return_std:
             # Noise-only band: s_j sqrt(1 + h(x)) in physical units. Exact for
             # iid noise; it undercovers model error (P3.5).
@@ -1532,20 +1535,21 @@ class PolyEmu():
                 std = std.reshape(Xshape[:-1] + (self.n_outputs,))
         return (Y_pred, std) if return_std else Y_pred
 
-    def generate_backward_emulator(self, 
-                                   X_train_scaled, 
+    def generate_backward_emulator(self,
+                                   X_train_scaled,
                                    Y_train_scaled,
                                    X_val_scaled,
                                    Y_val_scaled,
                                 #    RMSE_upper=0.1,
-                                   RMSE_tol=1e-2, 
-                                   fRMSE_tol=1e-1, 
-                                   init_deg=None, 
+                                   RMSE_tol=1e-2,
+                                   fRMSE_tol=1e-1,
+                                   init_deg=None,
                                    max_degree=None,
                                    dim_reduction=False,
-                                   per_mode_thres=None, 
+                                   per_mode_thres=None,
                                    batch_size=10000,
                                    loo=False):
+        """Fit the backward degree sweep (internal; normally called by the constructor)."""
         if init_deg is None:
             if self.n_outputs > 6:
                 init_deg = 1
@@ -1570,7 +1574,6 @@ class PolyEmu():
         running_time_list = []
         degree_list = []
         cond_list = []
-        loo_list = []
         loo_per_output_list = []
         leverage_list = []
         import time
@@ -1592,6 +1595,7 @@ class PolyEmu():
                 stacklevel=2,
             )
         stop_reason = "reached max_degree"
+        multi_indices = None
         _ref_X = X_train_scaled if loo else X_val_scaled
         _x_rms = float(np.sqrt(np.mean(np.asarray(_ref_X) ** 2)))
         rmse_ref = _x_rms if _x_rms > 0 else 1.0
@@ -1602,6 +1606,7 @@ class PolyEmu():
                 raw_indices = generate_multi_indices(self.n_outputs, d)
             else:
                 aux_indices = given_order_indices(self.n_outputs, d)
+                assert multi_indices is not None
                 raw_indices = np.concatenate((multi_indices, aux_indices), axis=0)
 
             candidate_indices = indices_selection(raw_indices, axis_caps)
@@ -1667,7 +1672,7 @@ class PolyEmu():
                 X_val_pred = evaluate_emulator_batched(
                     Y_val_scaled, coeffs, multi_indices, batch_size=batch_size
                 )
-                RMSE_val, AIC, BIC = predictive_mse_aic_bic(
+                RMSE_val, AIC, BIC = predictive_rmse_aic_bic(
                     X_val_scaled, X_val_pred, multi_indices.shape[0],
                     n_train=Y_train_scaled.shape[0],
                 )
@@ -1737,6 +1742,7 @@ class PolyEmu():
         self._build_backward_plan()
 
     def backward_emulator(self, Y, batch_size=None, extrapolation="warn"):
+        """Evaluate the fitted backward emulator at Y."""
         float_or_int = isinstance(Y, (float, int))
         if isinstance(Y, list):
             Y = np.array(Y)

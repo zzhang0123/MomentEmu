@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import warnings
-from pathlib import Path
 
 import numpy as np
 
@@ -25,12 +24,14 @@ class ArrayScaler:
         self.scale_ = None if scale is None else np.asarray(scale, dtype=np.float64)
 
     def transform(self, X):
+        """Standardize X with the stored mean and scale."""
         X = np.asarray(X, dtype=np.float64)
         if self.scale_ is None:
             return X - self.mean_
         return (X - self.mean_) / self.scale_
 
     def inverse_transform(self, X):
+        """Undo transform()."""
         X = np.asarray(X, dtype=np.float64)
         if self.scale_ is None:
             return X + self.mean_
@@ -121,7 +122,7 @@ def save_emulator(emulator, path, *, float32=False, dataset_sha256=None):
         arrays[f"box_{name}_hi"] = np.asarray(box.hi, dtype=np.float64)
         arrays[f"box_{name}_scale"] = np.asarray(box.scale, dtype=np.float64)
     meta["hash_"] = meta.get("forward_hash", "")
-    np.savez(path, meta=_json_bytes(meta), **arrays)
+    np.savez(path, meta=_json_bytes(meta), **arrays)  # type: ignore[arg-type]
     return str(path)
 
 
@@ -204,7 +205,7 @@ def load_emulator(path):
         emu.backward_cond_est_ = float(meta.get("backward_cond_est", float("nan")))
         emu.backward_N_train_ = int(meta.get("backward_N_train", 0))
         emu._build_backward_plan()
-    emu.hash_ = meta.get("hash_", "")
+    emu.hash_ = meta.get("hash_", "")  # type: ignore[attr-defined]
     return emu
 
 

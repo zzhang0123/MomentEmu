@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import time
 
-import numpy as np
-
 from benchmarks.harness import (
-    accuracy, basis_size, cond_M, emulator_summary, fit_polyemu_best,
-    fixed_degree_kwargs, time_inference,
+    accuracy,
+    basis_size,
+    cond_M,
+    emulator_summary,
+    fit_polyemu_best,
+    fixed_degree_kwargs,
+    time_inference,
 )
 
 FIT_REPEATS = 3

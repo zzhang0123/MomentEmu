@@ -1,0 +1,47 @@
+site_name: MomentEmu
+site_url: https://zzhang0123.github.io/MomentEmu/
+repo_url: https://github.com/zzhang0123/MomentEmu
+edit_uri: edit/main/docs/
+theme:
+  name: material
+  features: [navigation.sections, navigation.top, content.code.copy, search.highlight]
+  palette:
+    - scheme: default
+      toggle: {icon: material/brightness-7, name: dark mode}
+    - scheme: slate
+      toggle: {icon: material/brightness-4, name: light mode}
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+            show_source: false
+            members_order: source
+            show_signature_annotations: true
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.arithmatex: {generic: true}
+  - toc: {permalink: true}
+extra_javascript:
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+nav:
+  - Home: index.md
+  - Guide:
+    - Quick start: guide/quickstart.md
+    - Method and when to use it: guide/method.md
+    - Basis specification: guide/basis.md
+    - Save, load and cite an emulator: guide/persistence.md
+    - Autodiff (JAX, PyTorch, SymPy): guide/autodiff.md
+    - Precision, prior box, error model: guide/numerics.md
+    - Migrating from the flat module: guide/migration.md
+  - API reference:
+    - MomentEmu.emulator: api/polyemu.md
+    - MomentEmu.core: api/core.md
+    - MomentEmu.jax_momentemu: api/jax.md
+    - MomentEmu.torch_momentemu: api/torch.md
+    - MomentEmu.symbolic_momentemu: api/symbolic.md
+  - Changelog: changelog.md

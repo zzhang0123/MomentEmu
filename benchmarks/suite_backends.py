@@ -30,6 +30,7 @@ def run(quick: bool = False) -> dict:
         import jax
         jax.config.update("jax_enable_x64", True)
         import jax.numpy as jnp
+
         from MomentEmu.jax_momentemu import create_jax_emulator
         f = create_jax_emulator(emu)
         x1, xb = jnp.asarray(Xt[0]), jnp.asarray(Xt[:1000])
@@ -52,6 +53,7 @@ def run(quick: bool = False) -> dict:
 
     try:
         import torch
+
         from MomentEmu.torch_momentemu import TorchMomentEmu
         tm = TorchMomentEmu(emu)
         tm = tm.double() if hasattr(tm, "double") else tm
@@ -61,7 +63,7 @@ def run(quick: bool = False) -> dict:
             y1 = tm(x1).detach().numpy(); yb = tm(xb).detach().numpy()
         r = {"backend": "torch (TorchMomentEmu, float64, no_grad)", "note": f"torch {torch.__version__}"}
         with torch.no_grad():
-            r["single_us"] = min(_rep(lambda: tm(x1))) 
+            r["single_us"] = min(_rep(lambda: tm(x1)))
             r["batch_us"] = min(_rep(lambda: tm(xb)))
         r["batch_per_sample_us"] = r["batch_us"] / 1000
         r["max_rel_diff_vs_numpy"] = float(max(np.max(np.abs(y1.reshape(ref1.shape) - ref1)) / np.max(np.abs(ref1)),

@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import numpy as np
 import pytest
-
-import jax
 
 jax.config.update("jax_enable_x64", True)
 
@@ -28,7 +27,7 @@ from MomentEmu.emulator import (
     given_order_indices,
     max_order,
 )
-from MomentEmu.monomials import MonomialPlan, evaluate_monomials_fast
+from MomentEmu.monomials import evaluate_monomials_fast
 
 
 @pytest.fixture(scope="module")
@@ -51,12 +50,11 @@ def logy_emu():
 # Critical / high findings
 # ---------------------------------------------------------------------------
 def test_logy_ignored_by_all_three_backends(logy_emu):
-    from MomentEmu.jax_momentemu import create_jax_emulator
-    from MomentEmu.symbolic_momentemu import create_symbolic_emulator
-    from MomentEmu.torch_momentemu import TorchMomentEmu
-
     # P2.1 added log_Y support to JAX; torch/symbolic still refuse.
     import jax.numpy as jnp
+
+    from MomentEmu.jax_momentemu import create_jax_emulator
+    from MomentEmu.torch_momentemu import TorchMomentEmu
 
     rng = np.random.default_rng(30)
     X = rng.uniform(-1.0, 1.0, (100, 2))
@@ -136,7 +134,6 @@ def test_max_order_off_by_one():
 
 
 def test_symb_emu_ignores_log_y(logy_emu):
-    import sympy as sp
 
     # A forward-only emulator has no backward coefficients; the export
     # must raise AttributeError rather than return log Y.
@@ -262,8 +259,9 @@ def test_package_self_shadowing():
 
 
 def test_requires_python_3_7_false():
-    import tomllib
     from pathlib import Path
+
+    import tomllib
 
     cfg = tomllib.loads(Path("pyproject.toml").read_text())
     assert ">=3.7" not in cfg["project"]["requires-python"]
@@ -443,7 +441,6 @@ def test_solve_redone_each_degree_no_cholesky():
     assert hasattr(PolyEmu, "forward_sweep_incremental_")
 
 
-@pytest.mark.xfail(strict=True, reason="P4.7 rmse rename")
 def test_predictive_mse_returns_rmse():
     import MomentEmu.core as core
 

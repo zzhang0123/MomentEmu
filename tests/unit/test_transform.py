@@ -1,10 +1,9 @@
 """P3.6: per-output transforms and backend parity (D4)."""
 from __future__ import annotations
 
+import jax
 import numpy as np
 import pytest
-
-import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
@@ -119,7 +118,6 @@ def test_shipped_te_is_linear():
     reason="companion datasets absent",
 )
 def test_ee_log_beats_linear_at_low_ell():
-    from MomentEmu.emulator import _transform_forward
 
     P = np.load(DATA_DIR / "perturbed_LCDM_params.npy")
     # The first two columns are ell/garbage; the 4049 outputs follow.

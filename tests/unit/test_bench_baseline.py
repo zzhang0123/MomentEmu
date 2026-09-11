@@ -4,7 +4,6 @@ from __future__ import annotations
 import types
 
 import numpy as np
-import pytest
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 from benchmarks.harness import fit_polyemu, fixed_degree_kwargs

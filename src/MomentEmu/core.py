@@ -15,16 +15,15 @@ from MomentEmu.guards import (
     finite_candidates,
 )
 
-
 ####### Moment vector and matrix #################
 
 def generate_moment_products(Phi, Y):
     """Generate moment products from evaluated basis functions Phi.
-    
+
     Args:
         Phi: evaluated basis functions (N x D), where N is the number of samples and D is the number of basis functions.
         Y: data matrix (N x m), where m is the number of output variables.
-        
+
     Returns:
         M: moment matrix (D x D)
         nu: moment vector (D x m)
@@ -179,13 +178,13 @@ def press_loo(
 def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
     """
     Filter out modes with tiny contributions.
-    
+
     Args:
         moment_matrix: moment matrix (D x D), where D is the number of basis functions.
         coeffs: coefficients array of shape D x m, where m is the number of variables (observables) to emulate.
         threshold: threshold for filtering out modes.
         homogeneous: all the observables use the same basis if True, otherwise allow different masks of basis functions.
-        
+
     Returns: mask array, where True means the mode is kept. Of shape D if homogeneous, otherwise of shape D x m.
     """
     warnings.warn(
@@ -206,13 +205,13 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
         raise ValueError("coeffs and moment_matrix dimensions are incompatible")
     if threshold < 0:
         raise ValueError("threshold must be non-negative")
-    
+
     D, m = coeffs.shape
-    
+
     # Total squared "energy" of each emulation function:
     # energy_list[j] = coeffs[:, j]^T @ moment_matrix @ coeffs[:, j]
     energy_list = np.einsum('ij,ij->j', coeffs, np.dot(moment_matrix, coeffs))
-    
+
     # Handle edge case where energy is zero or negative
     if np.any(energy_list <= 0):
         # For zero or negative energy, keep all modes for safety
@@ -220,16 +219,16 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
             return np.ones(D, dtype=bool)
         else:
             return np.ones((D, m), dtype=bool)
-    
+
     # Relative contribution of each mode to the total energy:
     # For mode i and observable j: (coeffs[i,j]^2 * moment_matrix[i,i]) / energy_list[j]
     moment_diag = np.diag(moment_matrix)
     relative_contribution = np.outer(moment_diag, np.ones(m)) * (coeffs**2)
     relative_contribution /= energy_list[np.newaxis, :]  # Broadcasting: (D, m) / (1, m)
-    
+
     # Handle numerical issues
     relative_contribution = np.nan_to_num(relative_contribution, nan=0.0, posinf=0.0, neginf=0.0)
-    
+
     if homogeneous:
         # Filter out modes with tiny contributions for all observables:
         # Keep a mode if it has significant contribution to ANY observable
@@ -238,9 +237,9 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
         # Filter out modes with tiny contributions for each observable:
         # Keep modes independently for each observable
         mask = relative_contribution >= threshold
-    
+
     return mask
-    
+
 
 ####### Metrics, cost and penalties ##############
 # metrics_and_penalties (AIC/AICc/BIC) was removed in 2.0.0: it mixed train and
@@ -248,10 +247,9 @@ def filter_modes(coeffs, moment_matrix, threshold=1e-3, homogeneous=True):
 # targets. Selection uses LOO-RMSE (P1.5) or a held-out RMSE.
 
 
-def predictive_mse_aic_bic(y_test, y_pred, k, n_train=None):
-    """
-    Compute predictive MSE, AIC and BIC on a test set, assuming Gaussian errors.
-    
+def predictive_rmse_aic_bic(y_test, y_pred, k, n_train=None):
+    """Compute predictive RMSE, AIC and BIC on a test set, assuming Gaussian errors.
+
     Parameters
     ----------
     y_test : array-like
@@ -263,11 +261,12 @@ def predictive_mse_aic_bic(y_test, y_pred, k, n_train=None):
     n_train : int, optional
         Number of training samples. If provided, used for BIC penalty.
         If None, BIC uses n_test as a fallback (heuristic).
-    
+
     Returns
     -------
-    mse : float
-        Predictive MSE
+    rmse : float
+        Predictive root-mean-square error (the value this function has always
+        returned; the old name said MSE).
     aic : float
         Predictive AIC
     bic : float
@@ -276,13 +275,13 @@ def predictive_mse_aic_bic(y_test, y_pred, k, n_train=None):
     y_test = np.array(y_test)
     y_pred = np.array(y_pred)
     n_test = len(y_test)
-    
+
     # Mean squared error on test set
     mse = np.mean((y_test - y_pred)**2)
-    
+
     # AIC formula (up to additive constants)
     aic = n_test * np.log(mse) + 2 * k
-    
+
     # BIC formula
     if n_train is None:
         n_bic = n_test  # fallback heuristic
@@ -291,8 +290,13 @@ def predictive_mse_aic_bic(y_test, y_pred, k, n_train=None):
     bic = n_bic * np.log(mse) + k * np.log(n_bic)
 
     rmse = np.sqrt(mse)
-    
+
     return rmse, aic, bic
+
+
+# Deprecated alias kept for 2.0.0 (the function returns RMSE, not MSE); it is
+# removed in 3.0.0. New code should call predictive_rmse_aic_bic.
+predictive_mse_aic_bic = predictive_rmse_aic_bic
 
 
 def select_best_model(rmse_list, aic_list=None, bic_list=None, rmse_tol=0.05):
@@ -527,7 +531,7 @@ def signal_aware_frac_err(
 
         mask = abs_ref >= floor                                  # broadcasts to ref shape
         # Strategy label per column
-        strategy = np.where(wide_dr.squeeze(0), "signal_mask", "plain_rel")
+        strategy: object = np.where(wide_dr.squeeze(0), "signal_mask", "plain_rel")
         floor_out = floor.squeeze(0).copy()
         dr_out = dr.squeeze(0).copy()
     else:
@@ -553,7 +557,7 @@ def signal_aware_frac_err(
     # reported separately: the old code let it drop out silently and reported
     # a finite max_rel for the rest, so a dead output looked healthy.
     if use_per_output:
-        n_above_per_output = np.asarray(mask.sum(axis=0)).astype(int)
+        n_above_per_output: object = np.asarray(mask.sum(axis=0)).astype(int)
         fully_masked_outputs = np.flatnonzero(n_above_per_output == 0)
     else:
         n_above_per_output = int(n_above)

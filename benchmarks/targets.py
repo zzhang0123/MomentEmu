@@ -5,8 +5,8 @@ function, the degree used for the fixed-degree fit and the sample sizes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 

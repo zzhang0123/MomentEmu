@@ -9,7 +9,6 @@ import sympy as sp
 
 from MomentEmu.emulator import PolyEmu, generate_multi_indices, symbolic_polynomial_expressions
 
-
 LO = np.array([0.019, 0.09, 60.0, 0.90, 2.9, 0.03])
 HI = np.array([0.025, 0.15, 75.0, 1.02, 3.2, 0.09])
 NAMES = ["ob", "oc", "H0", "ns", "lnAs", "tau"]

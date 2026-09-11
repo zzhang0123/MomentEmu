@@ -60,8 +60,14 @@ jobs:
       - name: Show resolved environment
         run: |
           python -c "import MomentEmu, pathlib; p = pathlib.Path(MomentEmu.__file__); assert p.parent.parent.name == 'src', p; print('MomentEmu from', p)"
+      - name: ruff
+        run: ruff check src tests benchmarks examples
+      - name: mypy (public surface)
+        run: mypy
       - name: pytest (numerical gates, coverage gate)
         run: python -m pytest tests -q --cov=MomentEmu --cov-branch --cov-fail-under=80
+      - name: docs (strict)
+        run: mkdocs build --strict
       - name: Benchmarks (timings only, never fail)
         if: ${{ hashFiles('benchmarks/__main__.py') != '' }}
         continue-on-error: true

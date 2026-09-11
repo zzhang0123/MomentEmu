@@ -104,6 +104,8 @@ files = [
     "src/MomentEmu/emulator.py",
     "src/MomentEmu/core.py",
     "src/MomentEmu/io.py",
+    "src/MomentEmu/storage.py",
+    "src/MomentEmu/basis.py",
     "src/MomentEmu/monomials.py",
     "src/MomentEmu/guards.py",
     "src/MomentEmu/_stale_check.py",

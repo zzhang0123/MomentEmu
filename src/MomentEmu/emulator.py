@@ -626,7 +626,9 @@ class PolyEmu:
                 random_state=None,
                 verbose=0,
                 transform=None,
-                weights=None):
+                weights=None,
+                basis=None,
+                parameter_names=None):
         """
         Polynomial emulator class for both forward and backward emulation.
         X: N x n array of input parameters. N is the number of samples, n is the number of parameters.
@@ -708,6 +710,8 @@ class PolyEmu:
             verbose=verbose,
             transform=transform,
             weights=weights,
+            basis=basis,
+            parameter_names=parameter_names,
         )
 
         # Imported here, not at module scope, so `import MomentEmu` and the
@@ -745,6 +749,8 @@ class PolyEmu:
         check_design_columns(X)
         self._X_data = X
         self._Y_data = Y
+        self.basis = basis
+        self.parameter_names = list(parameter_names) if parameter_names is not None else [f"x{i}" for i in range(X.shape[1])]
 
         self.n_params = X.shape[1]
         self.n_outputs = Y.shape[1]
@@ -841,7 +847,11 @@ class PolyEmu:
                     stacklevel=2,
                 )
             elif max_degree_forward > max_deg_forward:
-                D = basis_size(self.n_params, max_degree_forward)
+                D = (
+                    basis_size(self.n_params, max_degree_forward)
+                    if self.basis is None
+                    else int(self.basis.build(self.parameter_names, max_degree_forward).shape[0])
+                )
                 if D >= X_train.shape[0]:
                     raise ValueError(
                         f"max_degree_forward = {max_degree_forward} needs a basis of D = {D} "
@@ -894,7 +904,11 @@ class PolyEmu:
                     stacklevel=2,
                 )
             elif max_degree_backward > max_deg_backward:
-                D = basis_size(self.n_outputs, max_degree_backward)
+                D = (
+                    basis_size(self.n_outputs, max_degree_backward)
+                    if self.basis is None
+                    else int(self.basis.build(self.parameter_names, max_degree_backward).shape[0])
+                )
                 if D >= X_train.shape[0]:
                     raise ValueError(
                         f"max_degree_backward = {max_degree_backward} needs a basis of D = {D} "
@@ -1021,7 +1035,9 @@ class PolyEmu:
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
 
-            if d == init_deg:
+            if self.basis is not None:
+                raw_indices = self.basis.build(self.parameter_names, d)
+            elif d == init_deg:
                 raw_indices = generate_multi_indices(self.n_params, d)
             else:
                 aux_indices = given_order_indices(self.n_params, d)
@@ -1572,6 +1588,29 @@ class PolyEmu:
         self.forward_singular_values_ = np.asarray(s)
         return self
 
+    def report(self, variable_names=None):
+        """Print a per-parameter report of the stored forward basis (P5.3).
+
+        Returns a dict with the term count, the retained per-parameter degree
+        and a copy-pasteable basis spec. See also sobol_report() (P5.5).
+        """
+        names = list(variable_names) if variable_names is not None else self.parameter_names
+        mi = np.asarray(self.forward_multi_indices)
+        per_param = mi.max(axis=0) if mi.size else np.zeros(self.n_params, dtype=int)
+        spec = self.basis.spec() if self.basis is not None else (
+            f"default total-degree basis, selected degree {self.forward_degree}"
+        )
+        deg_list: list[int] = [int(v) for v in per_param]
+        info = {
+            "n_terms": int(mi.shape[0]),
+            "parameter_names": list(names),
+            "per_parameter_degree": deg_list,
+            "basis": spec,
+        }
+        logger.info("forward basis: %d terms; per-parameter degree %s; %s",
+                    info["n_terms"], dict(zip(names, deg_list)), spec)
+        return info
+
     def _transforms(self):
         """Per-output transform tuple; legacy pickles get the log_Y mapping."""
         t = getattr(self, "transform", None)
@@ -1722,7 +1761,9 @@ class PolyEmu:
 
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
-            if d == init_deg:
+            if self.basis is not None:
+                raw_indices = self.basis.build(self.parameter_names, d)
+            elif d == init_deg:
                 raw_indices = generate_multi_indices(self.n_outputs, d)
             else:
                 aux_indices = given_order_indices(self.n_outputs, d)

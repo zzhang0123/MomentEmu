@@ -1,0 +1,3 @@
+# MomentEmu.monomials
+
+::: MomentEmu.monomials

@@ -45,7 +45,7 @@ where = ["src"]
 jax = ["jax>=0.4", "jaxlib"]
 torch = ["torch>=2.0"]
 all = ["jax>=0.4", "jaxlib", "torch>=2.0"]
-docs = ["mkdocs>=1.5", "mkdocs-material>=9", "mkdocstrings[python]>=0.24", "pymdown-extensions>=10"]
+docs = ["mkdocs>=1.5", "mkdocs-material>=9", "mkdocstrings[python]>=0.24", "pymdown-extensions>=10", "matplotlib>=3.7"]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",

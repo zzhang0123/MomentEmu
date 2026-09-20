@@ -23,24 +23,52 @@ plugins:
             show_signature_annotations: true
 markdown_extensions:
   - admonition
-  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ['.']
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.arithmatex: {generic: true}
   - toc: {permalink: true}
 extra_javascript:
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 nav:
   - Home: index.md
-  - Guide:
+  - Start here:
     - Quick start: guide/quickstart.md
-    - Method and when to use it: guide/method.md
-    - Basis specification: guide/basis.md
+  - The method:
+    - Moment projection: guide/method.md
+    - Accuracy and conditioning: guide/numerics.md
+  - Making the basis smaller:
+    - Overview: guide/reduction.md
+    - Prior truncation: guide/basis.md
+    - Selection from the response: guide/sparse.md
+    - Product structure: guide/factored.md
+    - Better coordinates: guide/coordinates.md
+  - Reading the model:
+    - Diagnostics: guide/diagnostics.md
+  - Deployment:
     - Save, load and cite an emulator: guide/persistence.md
     - Autodiff (JAX, PyTorch, SymPy): guide/autodiff.md
-    - Precision, prior box, error model: guide/numerics.md
+  - Reference:
     - Migrating from the flat module: guide/migration.md
   - API reference:
     - MomentEmu.emulator: api/polyemu.md
     - MomentEmu.core: api/core.md
+    - MomentEmu.basis: api/basis.md
+    - MomentEmu.monomials: api/monomials.md
+    - MomentEmu.sparse: api/sparse.md
+    - MomentEmu.factored: api/factored.md
+    - MomentEmu.rotation: api/rotation.md
+    - MomentEmu.warp: api/warp.md
+    - MomentEmu.precondition: api/precondition.md
+    - MomentEmu.recommend: api/recommend.md
+    - MomentEmu.guards: api/guards.md
+    - MomentEmu.io: api/io.md
+    - MomentEmu.storage: api/storage.md
     - MomentEmu.jax_momentemu: api/jax.md
     - MomentEmu.torch_momentemu: api/torch.md
     - MomentEmu.symbolic_momentemu: api/symbolic.md

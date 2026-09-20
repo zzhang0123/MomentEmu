@@ -31,12 +31,81 @@ def _standardise(A: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (A - mean) / scale, mean, scale
 
 
+def _jacobian_block(J: Any, n_rows: int, n: int, m: int) -> np.ndarray:
+    """Validate one (k, m, n) Jacobian block, promoting a 2-D single-output one."""
+    J = as_float64(np.asarray(J), "jacobian")
+    if J.ndim == 2:
+        J = J[:, None, :]
+    elif J.ndim != 3:
+        raise ValueError(
+            f"jacobian must be 2-D (N, n) or 3-D (N, m, n), got shape {J.shape}"
+        )
+    if J.shape[0] != n_rows:
+        raise ValueError(
+            f"jacobian has {J.shape[0]} rows, expected {n_rows} (one per sample)"
+        )
+    if J.shape[2] != n:
+        raise ValueError(
+            f"jacobian has {J.shape[2]} columns, expected {n} (one per parameter)"
+        )
+    if J.shape[1] != m:
+        raise ValueError(
+            f"jacobian has {J.shape[1]} outputs, expected {m} to match Y"
+        )
+    check_finite(J, "jacobian")
+    return J
+
+
+def _covariance_from_jacobian(
+    jacobian: Any,
+    X: np.ndarray,
+    scale_X: np.ndarray,
+    scale_Y: np.ndarray,
+    batch_size: int,
+) -> np.ndarray:
+    """Accumulate ``C = E[J^T J]`` from a supplied Jacobian, in the coordinates
+    this module works in.
+
+    A caller's model differentiates in physical units, while the rotation is
+    computed on standardised X and Y. The chain rule between them is
+
+        d(Ys)_m / d(Xs)_i = J_raw[m, i] * scale_X[i] / scale_Y[m],
+
+    and it is applied here rather than asked of the caller. Dropping the
+    ``scale_X`` factor returns a different leading direction whenever the
+    parameters have different scales, and does so silently: the result is
+    still a unit vector with a plausible spectrum.
+
+    A callable is handed RAW X, one batch at a time, so a large design never
+    needs its whole Jacobian in memory at once.
+    """
+    N, n = X.shape
+    m = scale_Y.shape[0]
+    is_callable = callable(jacobian)
+    if not is_callable:
+        jacobian = _jacobian_block(jacobian, N, n, m)
+    C = np.zeros((n, n))
+    step = max(int(batch_size), 1)
+    for start in range(0, N, step):
+        stop = min(start + step, N)
+        chunk = X[start:stop]
+        if is_callable:
+            J = _jacobian_block(jacobian(chunk), chunk.shape[0], n, m)
+        else:
+            J = jacobian[start:stop]
+        Js = J * scale_X[None, None, :] / scale_Y[None, :, None]
+        C += np.einsum("kmi,kmj->ij", Js, Js)
+    return C / float(N)
+
+
 def active_subspace(
     X: Any,
     Y: Any,
     pilot_degree: int = 3,
     batch_size: int = 2048,
     output_scaling: str = "global",
+    jacobian: Any = None,
+    gradient_covariance: Any = None,
     **pilot_kwargs: Any,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Eigendecomposition of the gradient covariance, largest first.
@@ -67,6 +136,15 @@ def active_subspace(
     reads. The default stays cheap; raise it only if the rotation looks
     unstable after the scaling is right.
 
+    ``jacobian`` replaces the pilot with the caller's own derivatives, which is
+    worth doing whenever the model is differentiable (JAX, PyTorch, an autodiff
+    simulator): the pilot is an error source, not only a cost. It takes a
+    callable ``f(X_chunk) -> (k, m, n)`` evaluated batch by batch on RAW X, or
+    a precomputed ``(N, m, n)`` array, or ``(N, n)`` for a single output. The
+    standardisation chain rule is applied here, so the caller supplies
+    derivatives in its own physical units. ``gradient_covariance`` takes a
+    ready ``(n, n)`` C instead and skips both the pilot and the accumulation.
+
     Returns:
         (eigenvalues, V): eigenvalues descending, V columns the matching
         eigenvectors in standardised-X coordinates.
@@ -82,13 +160,43 @@ def active_subspace(
             f"output_scaling must be 'global' or 'per_output', got "
             f"{output_scaling!r}"
         )
-    Xs, _, _ = _standardise(X)
+    if jacobian is not None and gradient_covariance is not None:
+        raise ValueError(
+            "pass jacobian or gradient_covariance, not both; they are two ways "
+            "to supply the same C = E[J^T J]"
+        )
+    Xs, _, scale_X = _standardise(X)
     if output_scaling == "per_output":
-        Ys, _, _ = _standardise(Y)
+        Ys, _, scale_Y = _standardise(Y)
     else:
         Ys = Y - Y.mean(axis=0)
         span = float(np.sqrt(np.mean(Ys ** 2)))
-        Ys = Ys / (span if span > 0.0 else 1.0)
+        span = span if span > 0.0 else 1.0
+        Ys = Ys / span
+        # One scalar for every output, so relative importance is preserved.
+        scale_Y = np.full(Y.shape[1], span)
+
+    if gradient_covariance is not None:
+        C = as_float64(np.asarray(gradient_covariance), "gradient_covariance")
+        check_finite(C, "gradient_covariance")
+        n = Xs.shape[1]
+        if C.shape != (n, n):
+            raise ValueError(
+                f"gradient_covariance must be ({n}, {n}), got shape {C.shape}"
+            )
+        C = 0.5 * (C + C.T)
+        evals, V = np.linalg.eigh(C)
+        order = np.argsort(evals)[::-1]
+        return np.maximum(evals[order], 0.0), V[:, order]
+
+    if jacobian is not None:
+        C = _covariance_from_jacobian(
+            jacobian, X, scale_X, scale_Y, batch_size
+        )
+        C = 0.5 * (C + C.T)
+        evals, V = np.linalg.eigh(C)
+        order = np.argsort(evals)[::-1]
+        return np.maximum(evals[order], 0.0), V[:, order]
 
     pilot_kwargs.setdefault("forward", True)
     pilot_kwargs.setdefault("backward", False)
@@ -181,6 +289,8 @@ class ActiveSubspaceEmu:
         pilot_degree: int = 3,
         output_scaling: str = "global",
         pilot_kwargs: dict | None = None,
+        jacobian: Any = None,
+        gradient_covariance: Any = None,
         **kwargs: Any,
     ) -> None:
         X = as_float64(np.asarray(X), "X")
@@ -190,6 +300,7 @@ class ActiveSubspaceEmu:
         n = X.shape[1]
         self.eigenvalues, V_full = active_subspace(
             X, Y, pilot_degree=pilot_degree, output_scaling=output_scaling,
+            jacobian=jacobian, gradient_covariance=gradient_covariance,
             **(pilot_kwargs or {})
         )
         total = float(self.eigenvalues.sum())

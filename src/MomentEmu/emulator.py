@@ -45,6 +45,8 @@ from MomentEmu.guards import (
     resolve_batch_shape,
 )
 from MomentEmu.monomials import (
+    ChebyshevPlan,
+    LegendrePlan,
     MonomialPlan,
     fold_output_affine,
 )
@@ -67,6 +69,16 @@ def _degenerate_columns(fit: _LegendreFit) -> np.ndarray:
         np.abs(fit.coef[const_row]), np.sqrt(np.maximum(fit.total_var, 0.0))
     )
     return fit.explained <= (_DEGENERATE_REL * signal_scale) ** 2
+
+
+#: Basis families the forward model can be fitted in. Which one is best is a
+#: property of the DESIGN, not of the basis: a family is well conditioned when
+#: the design is distributed like the measure it is orthogonal under.
+BASIS_PLANS = {
+    "monomial": MonomialPlan,
+    "legendre": LegendrePlan,
+    "chebyshev": ChebyshevPlan,
+}
 
 
 class _LegendreFit(NamedTuple):
@@ -371,7 +383,8 @@ def compute_moments_vector_output(X, Y, multi_indices):
 
     return Mm, nu
 
-def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000, weights=None):
+def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000,
+                                          weights=None, plan_cls=None):
     """Batched moment build on the P0.7 plan, with optional sample weights (P5.2, P5.6).
 
     Args:
@@ -381,6 +394,11 @@ def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000,
         batch_size: number of samples per batch
         weights: optional per-sample weights (N,), normalised to mean 1; None
             reproduces the unweighted moments bit for bit.
+        plan_cls: basis plan class, defaulting to MonomialPlan. It MUST match
+            the basis the caller evaluates with. Building the moments in one
+            basis and predicting in another fits a different model and says
+            nothing about it: the residual of the stored coefficients was 1.30
+            where a direct solve in the same basis gave 2.5e-04.
 
     Returns: (Mm (D, D), nu (D, m)).
     """
@@ -399,8 +417,8 @@ def compute_moments_vector_output_batched(X, Y, multi_indices, batch_size=10000,
         w = w / w.mean()
         if np.all(w == 1.0):
             w = None  # P5.6: uniform weights == unweighted, bit for bit
-    # One level-wise recursive plan for all batches (P0.7/P5.2).
-    plan = MonomialPlan.build(multi_indices)
+    # One plan for all batches (P0.7/P5.2).
+    plan = (plan_cls or MonomialPlan).build(multi_indices)
     for start_idx in range(0, N, batch_size):
         end_idx = min(start_idx + batch_size, N)
         X_batch = X[start_idx:end_idx]
@@ -743,6 +761,8 @@ class PolyEmu:
                 weights=None,
                 basis=None,
                 scaling="standard",
+                basis_kind="monomial",
+                ridge=0.0,
                 parameter_names=None):
         """
         Polynomial emulator class for both forward and backward emulation.
@@ -958,6 +978,29 @@ class PolyEmu:
             Y_val = _transform_forward(Y_val, self.transform)
 
         # Scale the training data
+        if float(ridge) < 0.0:
+            raise ValueError(f"ridge must be >= 0, got {ridge}")
+        # Tikhonov on the moment matrix, scaled to its mean diagonal. Off by
+        # default: it trades bias for variance, and that is the caller's call.
+        self.ridge = float(ridge)
+        if basis_kind not in BASIS_PLANS:
+            raise ValueError(
+                f"basis_kind must be one of {tuple(BASIS_PLANS)}, got {basis_kind!r}"
+            )
+        self.basis_kind = str(basis_kind)
+        if basis_kind != "monomial":
+            # Both families are defined on [-1, 1] and clipped outside it, so
+            # the box map is not a preference here but a precondition.
+            if scaling == "standard":
+                scaling = "box"
+            if backward:
+                raise ValueError(
+                    f"basis_kind={basis_kind!r} covers the forward model only; "
+                    "the backward map is fitted over the n_outputs outputs and "
+                    "its symbolic and storage paths assume monomials. Fit the "
+                    "forward model with this basis, or the backward model "
+                    "separately with the default."
+                )
         if scaling not in ("standard", "box"):
             raise ValueError(
                 f"scaling must be 'standard' or 'box', got {scaling!r}"
@@ -1246,6 +1289,7 @@ class PolyEmu:
                 M_b, nu_b = compute_moments_vector_output_batched(
                     X_train_scaled, Y_train_scaled, idx,
                     batch_size=batch_size, weights=weights,
+                    plan_cls=self._plan_cls,
                 )
                 return M_b, nu_b, None
             prev = _inc["indices"]
@@ -1256,7 +1300,7 @@ class PolyEmu:
             ):
                 new = idx[prev.shape[0]:]
                 if new.shape[0]:
-                    Phi_new = MonomialPlan.build(new).evaluate(X_train_scaled)
+                    Phi_new = self._plan_cls.build(new).evaluate(X_train_scaled)
                 else:
                     Phi_new = np.empty((_N_train, 0))
                 # Grow one buffer in place instead of hstacking (which holds two
@@ -1297,8 +1341,9 @@ class PolyEmu:
                 M, nu = compute_moments_vector_output_batched(
                     X_train_scaled, Y_train_scaled, idx,
                     batch_size=batch_size, weights=weights,
+                    plan_cls=self._plan_cls,
                 )
-                Phi = MonomialPlan.build(idx).evaluate(X_train_scaled)
+                Phi = self._plan_cls.build(idx).evaluate(X_train_scaled)
             _inc["indices"] = idx
             _inc["phi"] = Phi
             _inc["phiw"] = None if _w_norm is None else Phi * _w_norm[:, None]
@@ -1364,12 +1409,13 @@ class PolyEmu:
                     M, nu = compute_moments_vector_output_batched(
                         X_train_scaled, Y_train_scaled, multi_indices,
                         batch_size=batch_size, weights=weights,
+                        plan_cls=self._plan_cls,
                     )
                     Phi = None
-                    _plan_loo = MonomialPlan.build(multi_indices)
+                    _plan_loo = self._plan_cls.build(multi_indices)
                 coeffs, cond, loo_rmse, loo_per_out, lev_max = press_loo(
                     M, nu, Phi, Y_train_scaled, on_singular="warn", degree=d,
-                    weights=weights, plan=_plan_loo,
+                    weights=weights, plan=_plan_loo, ridge=self.ridge,
                     X_scaled=None if Phi is not None else X_train_scaled,
                     batch_size=batch_size,
                 )
@@ -1385,11 +1431,12 @@ class PolyEmu:
             else:
                 M, nu, Phi = _moments(multi_indices)
                 coeffs, cond = solve_emulator_coefficients(
-                    M, nu, on_singular="warn", degree=d, return_cond=True
+                    M, nu, on_singular="warn", degree=d, return_cond=True,
+                    ridge=self.ridge,
                 )
-                if cond >= COND_QR:
+                if self.ridge == 0.0 and cond >= COND_QR:
                     # P5.4: refit this rung with CholeskyQR2 / Householder QR.
-                    _Phi_qr = MonomialPlan.build(multi_indices).evaluate(X_train_scaled)
+                    _Phi_qr = self._plan_cls.build(multi_indices).evaluate(X_train_scaled)
                     _c_qr, _cond_qr = solve_emulator_coefficients(
                         M, nu, on_singular="warn", degree=d, return_cond=True,
                         Phi=_Phi_qr, Y=Y_train_scaled,
@@ -1494,7 +1541,7 @@ class PolyEmu:
             _rss = np.sum((Y_train_scaled - _inc["phi"] @ coeffs) ** 2, axis=0)
         else:
             _rss = np.zeros(self.n_outputs)
-            _final_plan = MonomialPlan.build(multi_indices)
+            _final_plan = self._plan_cls.build(multi_indices)
             for _s in range(0, self.forward_N_train_, batch_size):
                 _e = min(_s + batch_size, self.forward_N_train_)
                 _rb = Y_train_scaled[_s:_e] - _final_plan.evaluate(
@@ -1504,10 +1551,15 @@ class PolyEmu:
         self.forward_resid_std_ = np.sqrt(_rss / _dof)
         self._build_forward_plan()
 
+    @property
+    def _plan_cls(self):
+        """Basis plan class; a pickle from before basis_kind was added has none."""
+        return BASIS_PLANS[getattr(self, "basis_kind", "monomial")]
+
     def _build_forward_plan(self):
         """Build the P0.7 monomial plan and folded output affine for inference."""
         mi = np.asarray(self.forward_multi_indices)
-        self.forward_plan = MonomialPlan.build(mi)
+        self.forward_plan = self._plan_cls.build(mi)
         scale_Y = self.scaler_Y.scale_
         if scale_Y is None:
             scale_Y = np.ones(self.n_outputs)
@@ -1871,7 +1923,7 @@ class PolyEmu:
         from MomentEmu.storage import reduced_rank_coefficients
 
         mi = self.forward_multi_indices
-        Phi = MonomialPlan.build(mi).evaluate(self._X_train_scaled_)
+        Phi = self._plan_cls.build(mi).evaluate(self._X_train_scaled_)
         N = Phi.shape[0]
         M = Phi.T @ Phi / N
         nu = Phi.T @ self._Y_train_scaled_ / N
@@ -2792,6 +2844,13 @@ class PolyEmu:
         """
         _warn_export_conditioning(getattr(self, "forward_cond_est_", None), "forward")
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
+        if getattr(self, "basis_kind", "monomial") != "monomial":
+            raise NotImplementedError(
+                f"symbolic export assumes a monomial basis and this emulator "
+                f"was fitted with basis_kind={self.basis_kind!r}. Its "
+                "coefficients multiply Chebyshev polynomials, so reading them "
+                "as monomial coefficients would be silently wrong."
+            )
         exprs = symbolic_polynomial_expressions(
             self.forward_coeffs,
             self.forward_multi_indices,

@@ -92,6 +92,46 @@ def qr_solve(Phi, Y, *, rcond=1e-12):
     return lstsq(Phi, Y, cond=rcond)[0], rank
 
 
+def apply_ridge(M, ridge: float):
+    """Return ``(M + diag(lam), lam)`` with ``lam_i = ridge * M_ii``.
+
+    Tikhonov regularisation, scaled PER COLUMN rather than by one number, which
+    is the same thing as ridging standardised predictors. A single
+    ``ridge * trace(M) / D`` is only safe when the diagonal is roughly uniform,
+    and a polynomial moment matrix is the opposite of that: on a degree-10
+    rotated fit of the 21cmGEM benchmark the diagonal spanned 7.0e-01 to
+    4.99e+16, a factor of 7e16, so one common lambda crushed the low-order
+    terms while barely touching the high-order ones and the figure of merit
+    went from 1.50 to 34.26 percent. Per column it went to 1.49.
+
+    It is not what the QR refit is. QR solves the SAME least-squares problem
+    more accurately; this solves a DIFFERENT, better-posed one, trading bias
+    for variance. Each eigenvalue gains roughly its own lambda, so the
+    condition number is bounded however singular M was. That distinction is
+    why QR alone cannot rescue an over-complete basis: with 969 terms on 3,200
+    samples of an effectively two-dimensional target, cond(M) is 2.3e21 and the
+    unregularised Cholesky returns NaN, while a ridge of 1e-12 returns a model
+    with a held-out error of 1.1e-3.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    ridge = float(ridge)
+    if ridge < 0.0:
+        raise ValueError(f"ridge must be >= 0, got {ridge}")
+    if ridge == 0.0 or M.size == 0:
+        return M, 0.0
+    D = M.shape[0]
+    diag = np.diag(M).astype(np.float64)
+    mean = float(np.mean(diag))
+    if not np.isfinite(mean) or mean <= 0.0:
+        return M, 0.0
+    # A column of no variance would otherwise receive no penalty at all and
+    # leave M singular, so the per-column term has a floor.
+    lam = ridge * np.maximum(diag, mean * 1e-12)
+    out = M.copy()
+    out.flat[:: D + 1] += lam
+    return out, lam
+
+
 def solve_emulator_coefficients(
     M,
     nu,
@@ -100,6 +140,7 @@ def solve_emulator_coefficients(
     warn_at: float = COND_WARN,
     raise_at: float = COND_RAISE,
     qr_at: float = COND_QR,
+    ridge: float = 0.0,
     degree: int | None = None,
     return_cond: bool = False,
     Phi=None,
@@ -128,6 +169,7 @@ def solve_emulator_coefficients(
     """
     M = np.asarray(M, dtype=np.float64)
     nu = np.asarray(nu, dtype=np.float64)
+    M, _lam = apply_ridge(M, ridge)
     if M.ndim != 2 or M.shape[0] != M.shape[1]:
         raise ValueError(f"M must be a square 2-D matrix, got shape {M.shape}")
     if nu.ndim != 2 or nu.shape[0] != M.shape[0]:
@@ -144,7 +186,9 @@ def solve_emulator_coefficients(
         n_samples=None,
         method="auto",
     )
-    if rep.cond >= qr_at and Phi is not None:
+    # QR solves the unregularised problem, so it is not a refinement of a
+    # ridged solve but a different answer to a different question.
+    if ridge == 0.0 and rep.cond >= qr_at and Phi is not None:
         # P5.4 / T-001: at cond >= COND_QR refit with CholeskyQR2 (Householder
         # QR if its Cholesky fails / loses rank); the solve keeps the
         # monomial-z basis. QR works on Phi, whose condition number is the
@@ -189,6 +233,7 @@ def press_loo(
     warn_at: float = COND_WARN,
     raise_at: float = COND_RAISE,
     qr_at: float = COND_QR,
+    ridge: float = 0.0,
     degree: int | None = None,
     weights=None,
     plan=None,
@@ -210,6 +255,10 @@ def press_loo(
 
     M = np.asarray(M, dtype=np.float64)
     nu = np.asarray(nu, dtype=np.float64)
+    # Ridging M before the factorisation makes the leverage below the RIDGE
+    # leverage, so PRESS stays the exact leave-one-out error of the model
+    # actually being fitted.
+    M, _lam = apply_ridge(M, ridge)
     if Phi is None:
         if plan is None or X_scaled is None:
             raise ValueError(
@@ -244,7 +293,7 @@ def press_loo(
         nan = float("nan")
         return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
     coeffs = cho_solve((cf, lower), nu, check_finite=False)
-    if rep.cond >= qr_at:
+    if ridge == 0.0 and rep.cond >= qr_at:
         # P5.4: make the QR refit reachable on the default LOO path; the
         # leverage below still comes from the (successful) Cholesky factor.
         Phi_qr = Phi if Phi is not None else plan.evaluate(X_scaled)

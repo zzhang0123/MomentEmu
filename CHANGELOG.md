@@ -43,6 +43,50 @@ All notable changes to MomentEmu are documented here. The format follows
 
 ### Added
 
+- `PolyEmu(ridge=...)` and `core.apply_ridge`: Tikhonov regularisation of the
+  moment matrix, scaled PER COLUMN as `lam_i = ridge * M_ii`. Off by default.
+
+  This is the one class of remedy the package had no form of. `COND_WARN` and
+  `COND_RAISE` report conditioning, `COND_QR` changes the solver, and `Basis`
+  and sparse selection cut terms before the fit; none of them addresses a
+  basis that is over-complete for the data. QR solves the SAME least-squares
+  problem more accurately, while a ridge solves a DIFFERENT, better-posed one.
+  With 969 terms on 3,200 samples of an effectively two-dimensional target,
+  cond(M) is 2.3e21 and the unregularised Cholesky returns NaN; a ridge of
+  1e-12 returns a model with a held-out error of 1.1e-3.
+
+  Per column, not one common lambda. A polynomial moment matrix has a wildly
+  uneven diagonal -- on a degree-10 rotated fit of the 21cmGEM benchmark it
+  spanned 7.0e-01 to 4.99e+16 -- so a single `ridge * trace(M) / D` crushes the
+  low-order terms while barely touching the high-order ones, and the figure of
+  merit went from 1.50 to 34.26 percent. Per column it went to 1.49.
+
+  PRESS-LOO ridges the same matrix before factorising, so the leverage it
+  reads is the ridge leverage and degree selection scores the model actually
+  being fitted. The QR refit is skipped when a ridge is requested, since it
+  answers the unregularised question.
+
+- `PolyEmu(basis_kind="legendre"|"chebyshev")` and `monomials.LegendrePlan`,
+  `monomials.ChebyshevPlan`, sharing a `_TensorPlan` base. A tensor-product
+  family spans exactly what the monomial plan of the same index set spans, so
+  the fitted function is identical wherever conditioning is not the limit;
+  what changes is the conditioning.
+
+  Which family is right is a property of the DESIGN, not of the basis: a
+  family is well conditioned when the design is distributed like the measure
+  it is orthogonal under. Legendre suits a design that fills its box evenly,
+  which is what a Latin hypercube or uniform box gives, and at degree 14 on
+  such a design cond(M) was 9.7 against Chebyshev's 7.7e2 and the monomial
+  basis's 1.5e10. Chebyshev is orthogonal under the arcsine weight, which
+  concentrates at the edges, so an edge-starved design is its worst case: on
+  the 21cmGEM rotated coordinates, which put 1.2 to 5 percent of their samples
+  beyond |z| = 0.8 where a uniform design puts 20 percent, it was 12x worse
+  conditioned than monomials up to degree 10. Neither is the default.
+
+  Both are defined on [-1, 1] and clip outside it, so they force
+  `scaling="box"`, cover the forward model only, and refuse symbolic export
+  rather than letting their coefficients be read as monomial ones.
+
 - `PolyEmu(scaling="box")` and `guards.BoxScaler`: map each input column's
   training range onto [-1, 1] instead of dividing by its standard deviation.
   A polynomial basis wants a bounded argument, and dividing by sigma does not

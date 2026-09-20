@@ -13,6 +13,7 @@ so the plan can be reused by the JAX backend (P2.1) and the training build
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -212,3 +213,142 @@ def fold_output_affine(
     if const.size:
         C[const[0]] = C[const[0]] + np.asarray(mean_Y, dtype=np.float64)
     return C
+
+
+class _TensorPlan:
+    """Shared machinery for a tensor-product basis over one index set.
+
+    ``phi_alpha(z) = prod_i p_{alpha_i}(z_i)`` for a family of one-dimensional
+    polynomials supplied by the subclass. Such a family spans exactly what the
+    monomial plan of the same index set spans, so the fitted FUNCTION is
+    unchanged in exact arithmetic; what changes is the conditioning of the
+    system that produces it.
+
+    Which family is best is a property of the DESIGN, not of the basis. A
+    family is well conditioned when the design is distributed like the measure
+    it is orthogonal under: Legendre under a uniform box, Chebyshev under the
+    arcsine measure, which concentrates at the edges. On the 21cmGEM benchmark
+    the rotated coordinates put only 1.2 to 5 percent of their samples beyond
+    |z| = 0.8, where a uniform design would put 20 percent, and Chebyshev was
+    accordingly 12x WORSE conditioned than monomials up to degree 10.
+
+    The argument is clipped to [-1, 1]. Outside the training box the basis then
+    saturates rather than diverging, and the caller's extrapolation guard still
+    reports the excursion.
+    """
+
+    def __init__(self, multi_indices: np.ndarray) -> None:
+        self.multi_indices = np.asarray(multi_indices, dtype=np.int64)
+        if self.multi_indices.ndim != 2:
+            raise ValueError(
+                f"multi_indices must be 2-D, got shape {self.multi_indices.shape}"
+            )
+
+    @classmethod
+    def build(cls, multi_indices: np.ndarray) -> _TensorPlan:
+        """Return a plan for ``multi_indices`` (no downward closure needed)."""
+        return cls(multi_indices)
+
+    @property
+    def n_terms(self) -> int:
+        return int(self.multi_indices.shape[0])
+
+    @property
+    def max_degree(self) -> int:
+        mi = self.multi_indices
+        return int(mi.sum(axis=1).max()) if mi.size else 0
+
+    @staticmethod
+    def _one_dimensional(z: np.ndarray, dmax: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return (values, derivatives) of degrees 0..dmax at the points z."""
+        raise NotImplementedError
+
+    def _tables(self, X_scaled: Any) -> tuple[np.ndarray, list, list]:
+        X = np.asarray(X_scaled, dtype=np.float64)
+        n = self.multi_indices.shape[1]
+        if X.ndim != 2:
+            X = X.reshape(-1, n)
+        if X.shape[1] != n:
+            raise ValueError(
+                f"input has {X.shape[1]} columns; the plan was built for {n}"
+            )
+        Z = np.clip(X, -1.0, 1.0)
+        dmax = int(self.multi_indices.max()) if self.multi_indices.size else 0
+        tables = [self._one_dimensional(Z[:, i], dmax) for i in range(n)]
+        return Z, [t[0] for t in tables], [t[1] for t in tables]
+
+    def evaluate(self, X_scaled: Any) -> np.ndarray:
+        """Return the (N, D) design for the requested indices, in input order."""
+        Z, P, _ = self._tables(X_scaled)
+        out = np.ones((Z.shape[0], self.n_terms))
+        for r, alpha in enumerate(self.multi_indices):
+            for i in np.flatnonzero(alpha):
+                out[:, r] *= P[i][:, alpha[i]]
+        return out
+
+    def evaluate_derivatives(self, X_scaled: Any) -> np.ndarray:
+        """Return (n, N, D) dPhi/dz by the product rule."""
+        Z, P, dP = self._tables(X_scaled)
+        n = Z.shape[1]
+        out = np.zeros((n, Z.shape[0], self.n_terms))
+        for r, alpha in enumerate(self.multi_indices):
+            support = np.flatnonzero(alpha)
+            for i in support:
+                col = dP[i][:, alpha[i]].copy()
+                for j in support:
+                    if j != i:
+                        col *= P[j][:, alpha[j]]
+                out[i, :, r] = col
+        return out
+
+
+class ChebyshevPlan(_TensorPlan):
+    """Tensor-product Chebyshev basis of the first kind.
+
+    ``T_k`` is orthogonal under the arcsine weight ``1 / sqrt(1 - z**2)``,
+    which concentrates at the edges of the box, so this is the right family
+    for an edge-clustered design and the wrong one for a bell-shaped one.
+    """
+
+    @staticmethod
+    def _one_dimensional(z: np.ndarray, dmax: int) -> tuple[np.ndarray, np.ndarray]:
+        t = np.empty((z.size, dmax + 1))
+        u = np.empty((z.size, dmax + 1))
+        t[:, 0] = 1.0
+        u[:, 0] = 1.0
+        if dmax >= 1:
+            t[:, 1] = z
+            u[:, 1] = 2.0 * z
+        for k in range(1, dmax):
+            t[:, k + 1] = 2.0 * z * t[:, k] - t[:, k - 1]
+            u[:, k + 1] = 2.0 * z * u[:, k] - u[:, k - 1]
+        # dT_k/dz = k U_{k-1}
+        d = np.zeros_like(t)
+        for k in range(1, dmax + 1):
+            d[:, k] = k * u[:, k - 1]
+        return t, d
+
+
+class LegendrePlan(_TensorPlan):
+    """Tensor-product Legendre basis, normalised for a uniform design.
+
+    ``sqrt(2k + 1) P_k`` is orthonormal under the uniform probability measure
+    on [-1, 1], so this is the family matched to a design that fills its box
+    evenly, which is what a Latin hypercube or a uniform box produces.
+    """
+
+    @staticmethod
+    def _one_dimensional(z: np.ndarray, dmax: int) -> tuple[np.ndarray, np.ndarray]:
+        p = np.empty((z.size, dmax + 1))
+        dp = np.zeros((z.size, dmax + 1))
+        p[:, 0] = 1.0
+        if dmax >= 1:
+            p[:, 1] = z
+            dp[:, 1] = 1.0
+        for k in range(1, dmax):
+            # (k+1) P_{k+1} = (2k+1) z P_k - k P_{k-1}
+            p[:, k + 1] = ((2 * k + 1) * z * p[:, k] - k * p[:, k - 1]) / (k + 1)
+            # P'_{k+1} = (2k+1) P_k + P'_{k-1}, which is stable at z = +-1
+            dp[:, k + 1] = (2 * k + 1) * p[:, k] + dp[:, k - 1]
+        norm = np.sqrt(2.0 * np.arange(dmax + 1) + 1.0)
+        return p * norm, dp * norm

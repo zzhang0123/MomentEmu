@@ -65,6 +65,57 @@ All notable changes to MomentEmu are documented here. The format follows
   multiplicative structure.
 - `guards.connected_components`, shared by the additive and multiplicative
   structure detectors.
+- `MomentEmu.precondition` (T-002): `PreconditionedEmu` composes the rotation
+  (P2) and the warp (P4), which do not commute, and picks the order from the
+  data. Neither order dominates, and which one wins is a property of the
+  target:
+
+  A sharp feature along a ROTATED direction is invisible to a per-axis warp,
+  because no raw axis carries it. Measured at seven parameters, warping alone
+  changed nothing (every axis came back identity, matching the unpreconditioned
+  error to six digits), rotation alone reached 17.2 percent, and rotating then
+  warping reached 3.71 percent on the same 91 coefficients.
+
+  A ridge in WARPED coordinates is not a ridge in the raw ones. The active
+  subspace is a linear projection, so applying it first discards real signal:
+  on `tanh(sum a_i log x_i)`, rotation alone scored 36.9 percent against 33.2
+  percent for no preconditioning at all -- worse than doing nothing -- while
+  warping first concentrated the gradient-covariance spectrum from 0.832 to
+  0.961 in its leading direction and the composition then reached 7.06 percent
+  at 105 coefficients against 1,716.
+
+  Candidates are scored at the degree each can afford rather than at one shared
+  degree, since comparing a two-dimensional fit with a seven-dimensional one at
+  a degree the latter can reach hides what rotation is for. `select="accuracy"`
+  takes the lowest held-out error; `select="parsimony"` takes the smallest model
+  within a tolerance of it, which on the log-ridge target chose 105 coefficients
+  over 1,716 for 1.9 times the error.
+- `rotation.select_rank` and `ActiveSubspaceEmu.transform`, so the two
+  preconditioners share their rank rule and compose in either order.
+- `MomentEmu.warp` (T-002 / P4): `WarpedEmu` and `fit_warps` choose a monotone
+  map per input axis and fit the polynomial in those coordinates. The other
+  reductions cut the term count at a fixed convergence rate; this moves the
+  rate, so it multiplies with them. Polynomial convergence goes as `rho ** -d`,
+  with `rho` set by the distance from the interval to the nearest singularity
+  in the COMPLEX plane: for `tanh(20 (x - 0.3))` the poles at `0.3 + i pi/40`
+  predict a rate of 0.921 against a measured 0.919, and a warp is a conformal
+  map that moves them. Measured end to end on a target that is polynomial in
+  the logs of two decades-spanning parameters, the held-out error fell from
+  138.5 percent to 0.041 percent.
+
+  The scan is over a small single-parameter family (`log`, `sinh`, `kte`) per
+  axis rather than a free-form monotone spline. Free arc-length equalisation,
+  the obvious default, is degenerate -- equalising by `|f'|` makes the warped
+  response linear by construction -- and the blended version that avoids that
+  moved the rate only from 0.919 to 0.905. A family that was wrong about the
+  sharpness by a factor of 2.5 was worth 44,000x in term count, so the choice
+  of family matters far more than the precision of its parameter.
+
+  A candidate must cut the held-out error to 0.95 of what the identity gives
+  before it is accepted, because an axis that acts only through an interaction
+  has no marginal signal and would otherwise be handed a warp fitted to noise.
+  Selection scores the axes jointly by default; the cheaper marginal criterion
+  missed the transitions entirely on one test target.
 - `MomentEmu.sparse` (T-002 / P3): `SparseEmu` selects the index set *from* the
   response over a large candidate set by simultaneous orthogonal matching
   pursuit, expressing asymmetries no prior truncation can state. On a target

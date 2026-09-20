@@ -277,3 +277,94 @@ The candidate set is materialised as a design matrix, so its size is bounded by
 memory rather than by the `D x D` Gram a textbook formulation would build. The
 fast index search above is what makes a degree-25, `max_interaction=3`
 candidate set (86,976 terms in 0.14 s) buildable at all.
+
+
+## Choosing the coordinate, not the basis
+
+Everything above decides which basis functions to keep at a given convergence
+rate. Warping the inputs changes the rate itself, so it multiplies with the
+rest rather than overlapping.
+
+Polynomial approximation converges as `rho ** -d`, where `rho` is set by how far
+the target's nearest singularity in the **complex** plane sits from the
+interval, not by how sharply it bends on the real line. A monotone warp is a
+conformal map: it moves those singularities.
+
+```python
+from MomentEmu.warp import WarpedEmu, fit_warps
+
+warps = fit_warps(X, Y)
+[w.spec() for w in warps]        # ['log', 'log', 'identity', 'identity']
+emu = WarpedEmu(X, Y, max_degree_forward=8)
+emu.gain                          # held-out improvement over raw coordinates
+```
+
+Taking the log of a parameter that spans decades is the special case of this
+that a user would otherwise have to know to apply by hand. On a target that is
+polynomial in the logs of two such parameters, the held-out error fell from
+138.5% to 0.041%.
+
+Three things about the search are worth knowing.
+
+The scan covers a small single-parameter family per axis, not a free monotone
+spline. Free arc-length equalisation is degenerate: equalising by `|f'|` yields
+a coordinate in which the response is linear by construction. The blended
+version that avoids that moved the rate only from 0.919 to 0.905, while a
+parametric family wrong about the feature's sharpness by a factor of 2.5 was
+worth 44,000x in term count. The family matters more than its parameter.
+
+An axis is warped only on evidence. A candidate must cut the held-out error to
+0.95 of the identity's, because an axis acting purely through an interaction
+carries no marginal signal and would otherwise take whichever candidate best
+fitted the noise.
+
+Axes are scored together, not one at a time. `criterion="marginal"` is cheaper
+but reads only an axis's marginal effect, and missed two sharp transitions
+entirely on one test target.
+
+A warp does not commute with the uniform-design tools. A design uniform in the
+raw parameters is not uniform in the warped ones, so `sobol_report`,
+`interaction_graph` and `degree_profile` run on the inner emulator describe the
+warped coordinates.
+
+
+## Composing the two preconditioners
+
+Rotation and warping both change the coordinates, and they do not commute.
+Neither order is right in general.
+
+| target | warp only | rotate only | rotate then warp | warp then rotate |
+|---|---|---|---|---|
+| sharp feature on a rotated direction | 31.2% | 17.2% | **3.7%** | 17.2% |
+| ridge in log coordinates | 3.6% | 36.9% | 35.9% | **7.1%** |
+
+Two readings matter.
+
+A per-axis warp cannot see a feature that lies along a rotated direction: on
+the first target every axis came back `identity` and the result matched the
+unpreconditioned fit exactly. Rotation has to come first.
+
+Rotation applied first to the second target is *worse than doing nothing*
+(36.9% against 33.2%). The active subspace is a linear projection, and a target
+that is a ridge in log coordinates is not a ridge in the raw ones, so the rank
+reduction discards real signal. Warping first turns it into a genuine ridge --
+the leading gradient-covariance share went from 0.832 to 0.961 -- and the
+projection then costs almost nothing.
+
+```python
+from MomentEmu.precondition import PreconditionedEmu
+
+emu = PreconditionedEmu(X, Y, rank=2)          # order chosen from the data
+emu.order                                       # 'rotate_warp' or 'warp_rotate'
+emu.scores                                      # held-out error per candidate
+```
+
+Each order is scored at the highest degree *it* can afford, not at one degree
+shared by all: comparing a two-dimensional fit and a seven-dimensional one at a
+degree the seven-dimensional one can reach would hide the benefit rotation
+exists for.
+
+`select="accuracy"` takes the lowest error. `select="parsimony"` takes the
+smallest model within a tolerance of it, which is usually the useful choice:
+on the log-ridge target that is 105 coefficients instead of 1,716 for 1.9x the
+error.

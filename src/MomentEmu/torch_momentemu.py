@@ -21,9 +21,15 @@ class TorchMomentEmu(nn.Module):
 
     def __init__(self, trained_emulator, dtype=torch.float64):
         super().__init__()
-        if not hasattr(trained_emulator, "forward_coeffs"):
+        sparse = hasattr(trained_emulator, "candidate_indices") and not hasattr(
+            trained_emulator, "forward_multi_indices"
+        )
+        if not sparse and not hasattr(trained_emulator, "forward_coeffs"):
             raise ValueError("the Torch backend needs a forward emulator")
         self.dtype = dtype
+        if sparse:
+            self._init_from_sparse(trained_emulator, dtype)
+            return
         self.log_Y = bool(getattr(trained_emulator, "log_Y", False))
         transform = getattr(trained_emulator, "transform", None)
         if transform is None:
@@ -69,9 +75,56 @@ class TorchMomentEmu(nn.Module):
             ),
         )
 
+    def _init_from_sparse(self, emulator, dtype) -> None:
+        """Take a :class:`MomentEmu.sparse.SparseEmu`, which is a forward fit.
+
+        The closure walk needs a DOWNWARD CLOSED index set; a selected one is
+        not, which is what sparsity means, so ``_plan`` is left unset and every
+        basis goes through the multi-index path.
+        """
+        from MomentEmu.emulator import BASIS_PLANS
+
+        self.log_Y = False
+        mi = np.asarray(emulator.multi_indices)
+        self.multi_indices = mi
+        self.n_params = int(mi.shape[1])
+        self.n_outputs = int(np.asarray(emulator.coefficients).shape[1])
+        self.transform_codes = _transform_codes(
+            tuple("linear" for _ in range(self.n_outputs))
+        )
+        self._plan = None
+        self.basis_family = str(getattr(emulator, "basis_kind", "legendre"))
+        if self.basis_family not in BASIS_PLANS:
+            raise ValueError(f"unknown basis_kind {self.basis_family!r}")
+        self.table_degree = int(mi.max()) if mi.size else 0
+        # SparseEmu maps its box onto [-1, 1] as 2 (X - lo) / span - 1, which
+        # is (X - mean) / scale with these two.
+        span = np.asarray(emulator.span_, dtype=np.float64)
+        scale = 0.5 * span
+        self.register_buffer(
+            "coeffs", torch.tensor(np.asarray(emulator.coefficients), dtype=dtype)
+        )
+        self.register_buffer(
+            "input_mean",
+            torch.tensor(np.asarray(emulator.lo_, dtype=np.float64) + scale,
+                         dtype=dtype),
+        )
+        self.register_buffer("input_scale", torch.tensor(scale, dtype=dtype))
+        self.register_buffer(
+            "output_mean", torch.tensor(np.asarray(emulator.mean_Y_), dtype=dtype)
+        )
+        self.register_buffer(
+            "output_scale", torch.tensor(np.asarray(emulator.scale_Y_), dtype=dtype)
+        )
+
     def evaluate_basis(self, X_scaled: torch.Tensor) -> torch.Tensor:
-        """(N, D) design in the basis the emulator was fitted with."""
-        if self.basis_family == "monomial":
+        """(N, D) design in the basis the emulator was fitted with.
+
+        The closure walk is taken only when a plan carrying closure tables is
+        present, which a dense fit has and a sparse one does not; the family
+        alone cannot decide it.
+        """
+        if self.basis_family == "monomial" and self._plan is not None:
             return self.evaluate_monomials(X_scaled)
         return self.evaluate_tensor_basis(X_scaled)
 
@@ -79,10 +132,16 @@ class TorchMomentEmu(nn.Module):
         """(N, D) tensor-product design, ``prod_i p_{alpha_i}(z_i)``.
 
         Mirrors ``monomials._TensorPlan.evaluate``, clip included: outside the
-        training box the basis saturates rather than diverging, and the
-        caller's extrapolation guard still reports the excursion.
+        training box the tensor families saturate rather than diverging, and
+        the caller's extrapolation guard still reports the excursion.
+        Monomials are NOT clipped -- ``MonomialPlan`` does not, and a monomial
+        fit describes a diverging model out there, so clipping would agree
+        inside the box and describe a different model outside it.
         """
-        z_all = torch.clamp(X_scaled, -1.0, 1.0)
+        z_all = (
+            X_scaled if self.basis_family == "monomial"
+            else torch.clamp(X_scaled, -1.0, 1.0)
+        )
         idx = torch.as_tensor(
             self.multi_indices, dtype=torch.long, device=X_scaled.device
         )
@@ -99,6 +158,11 @@ class TorchMomentEmu(nn.Module):
                 if self.basis_family == "legendre":
                     # (k+1) P_{k+1} = (2k+1) z P_k - k P_{k-1}
                     nxt = ((2 * k + 1) * z * columns[k] - k * columns[k - 1]) / (k + 1)
+                elif self.basis_family == "monomial":
+                    # z^{k+1} = z * z^k. Named rather than left to the else,
+                    # which would evaluate monomials with Chebyshev's
+                    # recurrence and return plausible numbers.
+                    nxt = z * columns[k]
                 else:
                     # T_{k+1} = 2 z T_k - T_{k-1}
                     nxt = 2.0 * z * columns[k] - columns[k - 1]

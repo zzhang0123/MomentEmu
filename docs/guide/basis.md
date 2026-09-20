@@ -241,6 +241,34 @@ of the `C(d+r, r)` growth however little variance it carries. Use `scan_rank`.
 Keep the pilot cheap, too -- a higher-degree pilot wiggles in directions the
 target does not use and blurs the very gap the rank selection reads.
 
+**Supplying the Jacobian.** The rotation is read off a pilot polynomial only
+because the derivatives are otherwise unavailable. A differentiable model
+(JAX, PyTorch, an autodiff simulator) has them exactly, and the pilot is an
+error source as well as a cost:
+
+```python
+emu = ActiveSubspaceEmu(X, Y, rank=2, jacobian=model_jacobian)
+```
+
+`jacobian` takes a callable `f(X_chunk) -> (k, m, n)` evaluated batch by batch
+on raw X, or a precomputed `(N, m, n)` array, or `(N, n)` for a single output.
+`gradient_covariance` takes a ready `(n, n)` matrix `C = E[J^T J]` instead.
+The standardisation chain rule is applied inside, so the derivatives stay in
+the caller's own physical units. On a target with a 2-D active subspace in 7
+parameters, the exact Jacobian holds the five dead directions below `1e-12` of
+the spectrum, where a degree-3 pilot leaks above `1e-6` and raising the pilot
+degree does not fix it.
+
+Both arguments reach `scan_rank` and `PreconditionedEmu`. The covariance does
+not depend on the rank, so a scan builds it once rather than once per rank.
+`PreconditionedEmu` scores five orders, and under `warp_rotate` the rotation
+lives in the warped coordinates: the warp's own derivative is applied to the
+supplied Jacobian there, so a callable is always evaluated on raw X whichever
+order is being scored. A `gradient_covariance` cannot make that crossing,
+because moving an average of `J^T J` into warped coordinates needs the
+per-sample Jacobian the average has already summed away; it therefore drops
+`warp_rotate` from the candidate orders and says so.
+
 
 ## Letting the response choose the index set
 

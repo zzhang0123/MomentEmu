@@ -96,6 +96,48 @@ class Warp:
             return np.arcsin(np.clip(a * v, -1.0, 1.0)) / np.arcsin(a)
         raise ValueError(f"unknown shape {self.shape!r}")
 
+    def derivative(self, x: Any) -> np.ndarray:
+        """``du/dx`` of :meth:`__call__`, analytic.
+
+        A rotation fitted after a warp is computed in ``u``, while a caller's
+        model differentiates in ``x``. The chain rule between the two is one
+        division per axis, ``dY/du = (dY/dx) / (du/dx)``, and this is that
+        factor. See :class:`MomentEmu.precondition._Rotate`.
+
+        This differentiates what :meth:`__call__` actually computes, clamps
+        included: both the ``log`` pre-transform and the ``kte`` shape
+        saturate outside their domain, and a saturated map is flat, so the
+        derivative there is zero rather than infinite or NaN.
+        """
+        raw = np.asarray(x, dtype=np.float64)
+        if self.pre == "log":
+            tiny = np.finfo(float).tiny
+            v0 = np.log(np.maximum(raw, tiny))
+            d_pre = np.where(raw > tiny, 1.0 / np.where(raw > 0.0, raw, 1.0), 0.0)
+        else:
+            v0 = raw
+            d_pre = np.ones_like(raw)
+        span = self.hi - self.lo if self.hi > self.lo else 1.0
+        v = 2.0 * (v0 - self.lo) / span - 1.0
+        return self._shape_derivative(v) * (2.0 / span) * d_pre
+
+    def _shape_derivative(self, v: np.ndarray) -> np.ndarray:
+        if self.shape == "identity":
+            return np.ones_like(v)
+        if self.shape == "sinh":
+            b, c = self.param, self.centre
+            lo, hi = np.arcsinh(b * (-1.0 - c)), np.arcsinh(b * (1.0 - c))
+            return 2.0 * b / ((hi - lo) * np.sqrt(1.0 + (b * (v - c)) ** 2))
+        if self.shape == "kte":
+            a = self.param
+            t = a * v
+            inside = np.abs(t) < 1.0
+            safe = np.where(inside, t, 0.0)
+            return np.where(
+                inside, a / (np.arcsin(a) * np.sqrt(1.0 - safe ** 2)), 0.0
+            )
+        raise ValueError(f"unknown shape {self.shape!r}")
+
     def spec(self) -> str:
         """A one-line description, for reporting and symbolic export."""
         if self.shape == "identity" and self.pre == "identity":

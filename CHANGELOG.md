@@ -8,6 +8,79 @@ All notable changes to MomentEmu are documented here. The format follows
 
 ### Added
 
+- `MomentEmu.recommend` (T-004): `recommend(X, Y, budget=12)` reads the data,
+  chooses the estimator, the preconditioner order, the input scaling and the
+  basis family, and returns the fitted model as a `Recommendation` that
+  predicts in its place. Every mechanism it selects among already existed;
+  reaching one required knowing in advance that the target was a ridge, or
+  additively separable, or sparse in an orthogonal basis.
+
+  Nothing is decided from a statistic. Each candidate is fitted and scored on
+  one held-out split, because cond(M) values at which the normal equations were
+  fine and at which they lost five orders of accuracy overlap by six orders of
+  magnitude. Selection is on parsimony, the fewest coefficients among the
+  candidates within `parsimony_tol` of the best error, because a variance
+  target returned rank 6 where rank 2 at a higher degree was 38x smaller and
+  more accurate. Stages run in increasing cost and stop when `budget` is spent.
+  Stages 2 and 3 tune the stage-1 winner rather than re-running the search,
+  which is greedy in one axis; `report()` says so, and names every candidate
+  with its score and every stage that was cut, so a truncated search is visible
+  rather than silent.
+
+- `active_subspace(jacobian=...)` and `active_subspace(gradient_covariance=...)`
+  (T-005), reaching `ActiveSubspaceEmu`, `scan_rank`, `PreconditionedEmu` and
+  `recommend`: the rotation from the caller's own derivatives instead of a
+  pilot polynomial. `jacobian` takes a callable evaluated batch by batch on raw
+  X, a precomputed `(N, m, n)` array, or `(N, n)` for a single output;
+  `gradient_covariance` takes a ready `(n, n)` `C = E[J^T J]`. The
+  standardisation chain rule is applied inside, so the derivatives stay in the
+  caller's own units. The pilot is an error source and not only a cost: on a
+  target with a 2-D active subspace in 7 parameters, the exact Jacobian held
+  the five dead directions below 1e-12 of the spectrum, where a degree-3 pilot
+  leaks above 1e-6 and raising the pilot degree does not fix it.
+
+  Under `PreconditionedEmu(order="warp_rotate")` the rotation is computed in
+  the warped coordinates, so the warp's own derivative is applied to the
+  supplied Jacobian there and a callable is always evaluated on raw X whichever
+  order is being scored. Omitting that division is silent: on a
+  `tanh(a^T log x)` ridge over three decades the leading direction came out
+  `[0.99998, -0.003, 0.006]` against an analytic truth of
+  `[0.227, -0.098, 0.969]`, while the reported leading variance share stayed at
+  0.9992. A `gradient_covariance` cannot make that crossing, because moving an
+  average of `J^T J` into warped coordinates needs the per-sample Jacobian the
+  average has already summed away; that order raises when named and is dropped
+  from the candidates under `order="auto"`.
+
+- `rotation.gradient_covariance_matrix`: the standardised, symmetrised
+  `C = E[J^T J]` that `active_subspace` diagonalises, as a value rather than an
+  intermediate, so one covariance serves many rotations of the same data.
+
+- `warp.Warp.derivative`: analytic `du/dx` for every shape family and for the
+  log pre-transform. It differentiates what `__call__` computes, clamps
+  included, so a saturated region returns 0 rather than `inf` or `NaN`.
+
+- `core.triangular_cond` and a cond(Phi) report on the QR path. cond(M) =
+  cond(Phi)^2 and the accuracy of a QR solve depends on cond(Phi), but above
+  cond(M) ~ 1e16 the smallest eigenvalue of the COMPUTED M is round-off, so the
+  cond(M) estimate saturates near 1/eps and stops tracking Phi: a 1-D monomial
+  design at N = 200 reported 5.9e8 at both cond(Phi) = 1.1e11 and 1.3e14, and
+  every existing guard is stated on that saturating number.
+  `triangular_cond` runs LAPACK's triangular condition estimator on the `R` the
+  QR route already computed, an `O(D^2)` call against the QR's `O(N D^2)`, and
+  tracked the true 2-norm condition number to within a factor 1.92 to 2.21 over
+  eight decades. Above `COND_PHI_WARN = 1e12` the solve warns with cond(Phi)
+  and the digits it leaves. Reporting only: a ceiling on cond(Phi) was
+  implemented and then removed, because it refused fits that were accurate.
+
+- `SparseEmu(basis_kind=...)`. `sparse` carried its own orthonormal Legendre
+  construction alongside the one in `monomials`; the two agreed to 1.5e-15, so
+  the copy was removable. The greedy selection, the held-out path, the final
+  fit and the prediction now all come from one plan, which makes selecting in
+  one basis and predicting in another unreachable. The default stays
+  `legendre`, reproducing the previous figure of merit on the 21cmGEM benchmark
+  to four decimals (1.4478 percent, against 1.4555 for chebyshev and 1.5976 for
+  monomial), so the parameter buys no accuracy there.
+
 - `PolyEmu.interaction_graph()` (T-001): the full n x n pairwise interaction
   matrix from the orthonormal Legendre projection, plus the connected
   components ("blocks") it implies. Unlike `sobol_report`, which reports only
@@ -40,8 +113,6 @@ All notable changes to MomentEmu are documented here. The format follows
   parameter is sampling noise whose absolute size depends on N. Only `"even"`
   is inferred: `"odd"` would require the target to be globally odd in that
   parameter, which the powers alone cannot establish.
-
-### Added
 
 - `PolyEmu(ridge=...)` and `core.apply_ridge`: Tikhonov regularisation of the
   moment matrix, scaled PER COLUMN as `lam_i = ridge * M_ii`. Off by default.
@@ -153,7 +224,44 @@ All notable changes to MomentEmu are documented here. The format follows
 - `rotation.select_rank` and `ActiveSubspaceEmu.transform`, so the two
   preconditioners share their rank rule and compose in either order.
 
+### Changed
+
+- `guards.COND_QR = 1e13` (T-001): the QR refit is now gated on its own
+  threshold instead of reusing `COND_RAISE`. The two were conflated, but they
+  answer different questions: `COND_RAISE = 1e16` is where M is numerically
+  singular, while forming `M = Phi^T Phi` squares the conditioning, so the
+  normal equations start losing digits far earlier. `COND_RAISE` is unchanged,
+  so no fit that works today starts raising.
+
+  Measured through the fit path on a 4-parameter target, the stored
+  coefficients improved from 4.9e-11 to 2.6e-14 at degree 14 and from 6.3e-10
+  to 1.4e-14 at degree 16, both rungs sitting below the old trigger. The
+  honest magnitude: predictions were already far inside any practical
+  tolerance before the change, so this buys coefficient accuracy rather than
+  usable prediction accuracy, and it matters where coefficients are read
+  directly -- symbolic export (which already warns from cond 1e8) and
+  derivatives. A target limited by truncation rather than conditioning is
+  unaffected. Cost is 1.76x on a rung that triggers and nothing on one that
+  does not.
+
+- `Basis(degree=...)` now sets the top of the forward degree sweep instead of
+  being silently discarded. `PolyEmu(X, Y, basis=Basis(degree=2))` fits degree
+  2; previously the sweep ignored the Basis degree and ran to
+  `max_degree_forward` (or the sample-count cap), because `Basis.build` takes
+  the degree the caller passes in preference to its own. `max_degree_forward`
+  sets the same quantity, so passing both with different values now raises
+  `ValueError` rather than letting one win silently. `init_deg_forward` sets
+  where the sweep starts and is unaffected below the Basis degree; above it,
+  it raises. The heuristic default start is lowered to the Basis degree when it
+  would overshoot, so `Basis(degree=0)` fits the constant term.
+
 ### Fixed
+
+- `press_loo` refit the coefficients with QR above cond(M) = 1e13 but took the
+  leverage from `cho_factor(M)`, so the two came from different factorisations.
+  Against brute-force leave-one-out refits on a 1-D monomial design at N = 60,
+  the LOO relative error went from 1.2e-1 to 4.0e-8 at cond(Phi) = 1.2e8, and
+  from NaN to 2.8e-4 at 5.0e9.
 
 - `PreconditionedEmu` scored candidate orders with a dense polynomial fit
   whatever estimator was going to be used, which ranks the coordinates rather
@@ -243,7 +351,37 @@ All notable changes to MomentEmu are documented here. The format follows
   accuracy per retained term. The index set is shared across outputs, which
   keeps inference a single GEMM.
 
+- `interaction_graph` and `degree_profile` now exclude output columns whose
+  variation is at the rounding level of their own magnitude. Such a column's
+  Legendre coefficients are noise, and normalising them by their own sum gave
+  O(0.1) "shares"; because the default aggregation takes the max over outputs,
+  one constant column merged every parameter into a single block. Degenerate
+  columns are reported in `degenerate_outputs`, warned about when skipped, and
+  raise when all outputs or an explicitly requested output is degenerate.
+- `Basis` gained `__setstate__`, so a `Basis` pickled before a field existed
+  (directly or nested in a `PolyEmu`) no longer raises `AttributeError` from
+  `build`, `spec` or `==`. Same failure class as the B1 guard in
+  `PolyEmu._transforms`.
+- `Basis.build` validates `blocks` eagerly rather than inside the enumeration
+  generator, where the checks would not run until the first item was drawn,
+  and rejects an empty inner block.
+
 ### Fixed (performance)
+
+- `press_loo` ran two Householder QRs of the same `Phi`, one in
+  `normal_equation_factor` for the leverage factor and one through `qr_solve`
+  for the coefficient refit. `Phi` is `(N, D)` and a QR is `O(N D^2)`, so the
+  duplicate was the dominant cost of every unregularised fit above
+  cond(M) = 1e13. `Phi = Q U` with `U` upper holds for both QR routes, so one
+  factorisation now yields `U^T U = Phi^T Phi` for the leverage and
+  `U^{-1} Q^T Y` for the coefficients.
+
+- `scan_rank` built a fresh `ActiveSubspaceEmu` per rank, so an r-rank scan
+  fitted the pilot r times, and with `jacobian=` it called back into the
+  caller's model r times. The rotation does not depend on the rank, so the
+  gradient covariance is now built once for the whole scan. `PreconditionedEmu`
+  likewise shares one rotation between the `rotate` and `rotate_warp`
+  candidates: two Jacobian evaluations over the five orders rather than three.
 
 - `Basis.build` enumerated the `(d+1)**n` box and filtered it, so the cost did
   not depend on how small the constrained basis was. At n=7 a
@@ -265,43 +403,6 @@ All notable changes to MomentEmu are documented here. The format follows
   row order are unchanged, checked row for row against the box enumeration
   over 574 constraint combinations including the empty and degenerate corners.
 
-### Changed (default behaviour)
-
-- `guards.COND_QR = 1e13` (T-001): the QR refit is now gated on its own
-  threshold instead of reusing `COND_RAISE`. The two were conflated, but they
-  answer different questions: `COND_RAISE = 1e16` is where M is numerically
-  singular, while forming `M = Phi^T Phi` squares the conditioning, so the
-  normal equations start losing digits far earlier. `COND_RAISE` is unchanged,
-  so no fit that works today starts raising.
-
-  Measured through the fit path on a 4-parameter target, the stored
-  coefficients improved from 4.9e-11 to 2.6e-14 at degree 14 and from 6.3e-10
-  to 1.4e-14 at degree 16, both rungs sitting below the old trigger. The
-  honest magnitude: predictions were already far inside any practical
-  tolerance before the change, so this buys coefficient accuracy rather than
-  usable prediction accuracy, and it matters where coefficients are read
-  directly -- symbolic export (which already warns from cond 1e8) and
-  derivatives. A target limited by truncation rather than conditioning is
-  unaffected. Cost is 1.76x on a rung that triggers and nothing on one that
-  does not.
-
-### Fixed
-
-- `interaction_graph` and `degree_profile` now exclude output columns whose
-  variation is at the rounding level of their own magnitude. Such a column's
-  Legendre coefficients are noise, and normalising them by their own sum gave
-  O(0.1) "shares"; because the default aggregation takes the max over outputs,
-  one constant column merged every parameter into a single block. Degenerate
-  columns are reported in `degenerate_outputs`, warned about when skipped, and
-  raise when all outputs or an explicitly requested output is degenerate.
-- `Basis` gained `__setstate__`, so a `Basis` pickled before a field existed
-  (directly or nested in a `PolyEmu`) no longer raises `AttributeError` from
-  `build`, `spec` or `==`. Same failure class as the B1 guard in
-  `PolyEmu._transforms`.
-- `Basis.build` validates `blocks` eagerly rather than inside the enumeration
-  generator, where the checks would not run until the first item was drawn,
-  and rejects an empty inner block.
-
 ### Notes
 
 - Redundant basis terms do not bias the fit: the true coefficients are zero and
@@ -314,19 +415,6 @@ All notable changes to MomentEmu are documented here. The format follows
   across blocks is not recoverable afterwards: confirm the blocks with
   `interaction_graph()` first. Separability that holds only in a rotated frame
   gives no reduction in the original coordinates.
-
-### Changed (Basis degree)
-
-- `Basis(degree=...)` now sets the top of the forward degree sweep instead of
-  being silently discarded. `PolyEmu(X, Y, basis=Basis(degree=2))` fits degree
-  2; previously the sweep ignored the Basis degree and ran to
-  `max_degree_forward` (or the sample-count cap), because `Basis.build` takes
-  the degree the caller passes in preference to its own. `max_degree_forward`
-  sets the same quantity, so passing both with different values now raises
-  `ValueError` rather than letting one win silently. `init_deg_forward` sets
-  where the sweep starts and is unaffected below the Basis degree; above it,
-  it raises. The heuristic default start is lowered to the Basis degree when it
-  would overshoot, so `Basis(degree=0)` fits the constant term.
 
 ## [2.0.0] - 2026-09-11
 

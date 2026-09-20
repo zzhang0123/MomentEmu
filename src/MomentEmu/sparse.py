@@ -37,7 +37,7 @@ from typing import Any
 
 import numpy as np
 
-from MomentEmu.emulator import generate_multi_indices
+from MomentEmu.emulator import BASIS_PLANS, generate_multi_indices
 from MomentEmu.guards import COND_WARN, IllConditionedWarning, as_float64, check_finite
 
 #: Refuse to materialise a design matrix larger than this, in bytes.
@@ -232,6 +232,7 @@ class SparseEmu:
         random_state: Any = None,
         tol: float = 0.0,
         ridge: float = 0.0,
+        basis_kind: str = "legendre",
         parameter_names: Any = None,
     ) -> None:
         X = as_float64(np.asarray(X), "X")
@@ -240,6 +241,12 @@ class SparseEmu:
         check_finite(Y, "Y")
         if Y.ndim == 1:
             Y = Y.reshape(-1, 1)
+        if basis_kind not in BASIS_PLANS:
+            raise ValueError(
+                f"basis_kind must be one of {sorted(BASIS_PLANS)}, got "
+                f"{basis_kind!r}"
+            )
+        self.basis_kind = basis_kind
         n = X.shape[1]
         self.parameter_names = (
             [f"x{i}" for i in range(n)] if parameter_names is None
@@ -332,31 +339,31 @@ class SparseEmu:
         self.residual_path = info["residual_path"]
         self.cond = float(info["cond"])
 
+    @property
+    def _plan_cls(self):
+        """Basis plan class; a pickle from before basis_kind was added has none.
+
+        The fallback is "legendre" and not "monomial", because that is the
+        basis this selector always used.
+        """
+        return BASIS_PLANS[getattr(self, "basis_kind", "legendre")]
+
     def _map(self, X: np.ndarray) -> np.ndarray:
         """Map the training box onto [-1, 1], where the basis is orthonormal."""
         return 2.0 * (np.asarray(X, dtype=np.float64) - self.lo_) / self.span_ - 1.0
 
     def _design(self, V: np.ndarray, indices: Any = None) -> np.ndarray:
-        """Orthonormal Legendre product design over ``indices`` at points V."""
-        from scipy.special import eval_legendre
+        """Product design over ``indices`` at points V, in the chosen basis.
 
+        This used to carry its own orthonormal Legendre construction. The
+        shared plan reproduces it to 1.5e-15, so the copy was removable, and
+        every design in this class -- the greedy selection, the held-out path
+        and the prediction -- now comes from one plan. Selecting in one basis
+        and predicting in another is a silent failure, so they must not be
+        able to drift apart.
+        """
         mi = self.candidate_indices if indices is None else indices
-        n = V.shape[1]
-        dmax = int(mi.max()) if mi.size else 0
-        cols = [
-            np.stack(
-                [np.sqrt(2.0 * a + 1.0) * eval_legendre(a, V[:, i])
-                 for a in range(dmax + 1)],
-                axis=1,
-            )
-            for i in range(n)
-        ]
-        out = np.ones((V.shape[0], mi.shape[0]))
-        for r, alpha in enumerate(mi):
-            for i in range(n):
-                if alpha[i]:
-                    out[:, r] *= cols[i][:, alpha[i]]
-        return out
+        return self._plan_cls.build(mi).evaluate(V)
 
     def forward_emulator(self, X: Any) -> np.ndarray:
         """Predict at ``X`` in the original parameter coordinates."""
@@ -369,6 +376,7 @@ class SparseEmu:
         mi = self.multi_indices
         return {
             "n_terms": int(mi.shape[0]),
+            "basis_kind": self.basis_kind,
             "n_candidates": self.n_candidates,
             "compression": self.n_candidates / max(int(mi.shape[0]), 1),
             "max_total_degree": int(mi.sum(axis=1).max()) if mi.size else 0,

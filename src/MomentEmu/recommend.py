@@ -74,7 +74,8 @@ class Recommendation:
 
     def __init__(self, model: Any, config: dict, candidates: list[dict],
                  budget: int, spent: int, stages_run: list[str],
-                 stages_cut: list[str]) -> None:
+                 stages_cut: list[str], auto_rank: int | None = None) -> None:
+        self.auto_rank = auto_rank
         self.model = model
         self.config = dict(config)
         self.candidates = tuple(candidates)
@@ -99,6 +100,7 @@ class Recommendation:
         """The choice, the runners-up, and what was never tried."""
         return {
             "config": dict(self.config),
+            "auto_rank": self.auto_rank,
             "n_terms": self.n_terms,
             "candidates": tuple(dict(c) for c in self.candidates),
             "budget": self.budget,
@@ -153,6 +155,15 @@ def _blocks_from_pilot(Xf, Yf, degree: int) -> tuple[tuple[int, ...], ...]:
     except Exception:                                      # noqa: BLE001
         return (tuple(range(Xf.shape[1])),)
     return tuple(tuple(int(i) for i in b) for b in blocks)
+
+
+def _chosen_rank(model: Any) -> int | None:
+    """The rank a fitted PreconditionedEmu actually rotated onto, if it did."""
+    for step in getattr(model, "steps", ()):
+        rank = getattr(step, "rank", None)
+        if rank is not None:
+            return int(rank)
+    return None
 
 
 def _parsimonious(rows: list[dict], tol: float) -> dict:
@@ -340,9 +351,71 @@ def recommend(
     else:
         stages_cut.append("2-scaling")
 
+    # Stage 3: the rank, where the spare budget is worth most.
+    #
+    # PreconditionedEmu takes the rank from a variance target, and that is the
+    # rule failure mode 1 records as overshooting: it returned rank 6 where
+    # rank 2 at a higher degree was 38x smaller AND more accurate, because a
+    # direction costs a whole dimension of C(d+r, r) however little variance
+    # it carries. The scan therefore reaches BELOW the automatic rank, and is
+    # ordered upwards so a tight budget spends itself on the small ones.
+    auto_rank = _chosen_rank(best["model"])
+    best["rank"] = auto_rank
+    if auto_rank is None:
+        stages_cut.append("3-rank (the chosen order does not rotate)")
+    else:
+        wanted = [r for r in range(1, min(auto_rank + 1, X.shape[1]) + 1)
+                  if r != auto_rank]
+        room = int(budget) - spent
+        if room < 1 or not wanted:
+            stages_cut.append("3-rank (no budget left)")
+        else:
+            extra = dict(kwargs)
+            if best["basis_kind"] is not None:
+                extra["basis_kind"] = best["basis_kind"]
+            if best["scaling"] is not None:
+                extra["scaling"] = best["scaling"]
+            if best["estimator"] == "factored":
+                extra["blocks"] = blocks
+            elif best["estimator"] == "sparse":
+                extra.setdefault(
+                    "degree",
+                    _affordable_degree(X.shape[1], keep.size, scan_degree),
+                )
+            rank_common = {k: v for k, v in common.items() if k != "rank"}
+            for r in wanted[:room]:
+                rows.append(_fit_and_score(
+                    lambda rr=r, x=extra: PreconditionedEmu(
+                        Xf, Yf, order=best["order"], estimator=best["estimator"],
+                        rank=rr, **rank_common, **x
+                    ),
+                    Xh, Yh, f"{best['estimator']}+rank{r}", "3-rank",
+                    {"estimator": best["estimator"], "order": best["order"],
+                     "scaling": best["scaling"],
+                     "basis_kind": best["basis_kind"], "rank": r},
+                ))
+                spent += 1
+            if len(wanted) > room:
+                stages_cut.append(
+                    f"3-rank (budget covered {room} of {len(wanted)} ranks)"
+                )
+            stages_run.append("3-rank")
+            best = _parsimonious(
+                [r for r in rows if r["stage"] == "3-rank"] + [best],
+                parsimony_tol,
+            )
+
     # Stage 4: refit the winner on everything. The scored fits all saw a
     # held-out split, so the returned model must not be one of them.
-    config = {k: best[k] for k in ("estimator", "order", "scaling", "basis_kind")}
+    # Only "rank" can legitimately be absent: it is set by stage 3, which the
+    # budget or a non-rotating order may skip.
+    config = {
+        "estimator": best["estimator"],
+        "order": best["order"],
+        "scaling": best["scaling"],
+        "basis_kind": best["basis_kind"],
+        "rank": best.get("rank"),
+    }
     final = dict(kwargs)
     if config["scaling"] is not None:
         final["scaling"] = config["scaling"]
@@ -358,13 +431,17 @@ def recommend(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        refit_common = {k: v for k, v in common.items() if k != "rank"}
         model = PreconditionedEmu(
             X, Y, order=config["order"], estimator=config["estimator"],
-            **common, **final,
+            rank=config["rank"] if config["rank"] is not None else "auto",
+            **refit_common, **final,
         )
     stages_run.append("4-refit")
     for row in rows:
         row["chosen"] = row is best
         row.pop("model", None)
+    for row in rows:
+        row.setdefault("rank", None)
     return Recommendation(model, config, rows, int(budget), spent,
-                          stages_run, stages_cut)
+                          stages_run, stages_cut, auto_rank)

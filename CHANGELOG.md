@@ -43,6 +43,22 @@ All notable changes to MomentEmu are documented here. The format follows
 
 ### Added
 
+- `PolyEmu(scaling="box")` and `guards.BoxScaler`: map each input column's
+  training range onto [-1, 1] instead of dividing by its standard deviation.
+  A polynomial basis wants a bounded argument, and dividing by sigma does not
+  bound one. It matters most after a rotation, where a coordinate is a
+  weighted sum of several inputs: on the 21cmGEM benchmark one reached 11
+  standard deviations, making z**14 span 3.7e14. A degree-12 rotated fit there
+  scored 5.93 percent under standard scaling -- worse than its own degree 10 --
+  against 1.55 percent under the box map, with cond(M) 2.4e29 against 6.8e21.
+
+  It is not uniformly better and is therefore not the default. The gain needs
+  both a long reach and a high degree: on a coordinate reaching only 3.5
+  standard deviations the box map was 10x worse conditioned at degree 8, level
+  at 12, 18x better at 14 and 2151x better at 16. A stored emulator is
+  unaffected either way, because the box map has the same
+  `(x - mean_) / scale_` form and reloads through `io.ArrayScaler` unchanged.
+
 - `MomentEmu.rotation` (T-002 / P2): `ActiveSubspaceEmu` fits the forward model
   in the leading eigenvectors of the gradient covariance `C = E[J^T J]`, and
   `scan_rank` reports accuracy against coefficient count over a set of ranks.

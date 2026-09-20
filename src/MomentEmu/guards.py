@@ -17,6 +17,7 @@ import math
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -198,6 +199,72 @@ def count_axis_levels(X: np.ndarray, *, rtol: float = 1e-9) -> np.ndarray:
         gaps = np.diff(col)
         counts[i] = 1 + int(np.count_nonzero(gaps > tol))
     return counts
+
+
+class BoxScaler:
+    """Map each column's training range onto [-1, 1].
+
+    A polynomial basis wants a bounded argument, and dividing by the standard
+    deviation does not bound anything. A rotated coordinate, being a weighted
+    sum of several inputs, reached 11 standard deviations on the 21cmGEM
+    benchmark; z**14 is then 3.7e14 and the moment matrix is past saving. At
+    degree 12 on that problem standard scaling gave cond(M) = 2.4e29 and a
+    figure of merit of 5.93 percent, worse than its own degree 10, while the
+    box map gave 6.8e21 and 1.55 percent.
+
+    It is not uniformly better, which is why it is not the default. The gain
+    needs both a long reach and a high degree, and below that it loses:
+    measured on a coordinate reaching only 3.5 standard deviations, the box
+    map was 10x WORSE conditioned at degree 8, level at degree 12, 18x better
+    at 14 and 2151x better at 16. Compressing a short-reach coordinate into
+    [-1, 1] makes its low-order monomials more collinear, not less.
+
+    Exposes the StandardScaler attributes this package reads, because the box
+    map is also of the form ``(x - mean_) / scale_`` with ``mean_`` the
+    midpoint of the training range and ``scale_`` its half-width. A constant
+    column keeps a scale of 1, so it maps to zero rather than dividing by it.
+    Stored emulators therefore round-trip through io.ArrayScaler unchanged.
+    """
+
+    def __init__(self) -> None:
+        # Not Optional: every reader in this package treats mean_ and scale_
+        # as arrays, and a union would push a None check onto all of them.
+        # Emptiness is the unfitted state.
+        self.mean_: np.ndarray = np.zeros(0)
+        self.scale_: np.ndarray = np.ones(0)
+
+    def _check_fitted(self) -> None:
+        if self.scale_.size == 0:
+            raise AttributeError("BoxScaler has not been fitted")
+
+    @property
+    def var_(self) -> np.ndarray:
+        """Squared half-width, so callers reading var_ recover scale_."""
+        self._check_fitted()
+        return self.scale_ ** 2
+
+    def fit(self, X: Any) -> BoxScaler:
+        """Record each column's midpoint and half-width."""
+        A = np.asarray(X, dtype=np.float64)
+        lo, hi = A.min(axis=0), A.max(axis=0)
+        span = hi - lo
+        self.mean_ = 0.5 * (lo + hi)
+        self.scale_ = np.where(span > 0.0, 0.5 * span, 1.0)
+        return self
+
+    def fit_transform(self, X: Any) -> np.ndarray:
+        """Fit on X and return it mapped onto [-1, 1]."""
+        return self.fit(X).transform(X)
+
+    def transform(self, X: Any) -> np.ndarray:
+        """Map X with the stored midpoint and half-width."""
+        self._check_fitted()
+        return (np.asarray(X, dtype=np.float64) - self.mean_) / self.scale_
+
+    def inverse_transform(self, X: Any) -> np.ndarray:
+        """Undo :meth:`transform`."""
+        self._check_fitted()
+        return np.asarray(X, dtype=np.float64) * self.scale_ + self.mean_
 
 
 def connected_components(adjacency: np.ndarray) -> tuple[tuple[int, ...], ...]:

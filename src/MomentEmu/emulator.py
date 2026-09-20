@@ -20,6 +20,7 @@ from MomentEmu.core import (
 from MomentEmu.guards import (
     COND_QR,
     COND_RAISE,
+    BoxScaler,
     DomainBox,
     ExtrapolationWarning,
     IllConditionedError,
@@ -741,6 +742,7 @@ class PolyEmu:
                 transform=None,
                 weights=None,
                 basis=None,
+                scaling="standard",
                 parameter_names=None):
         """
         Polynomial emulator class for both forward and backward emulation.
@@ -956,7 +958,18 @@ class PolyEmu:
             Y_val = _transform_forward(Y_val, self.transform)
 
         # Scale the training data
-        self.scaler_X = StandardScaler()
+        if scaling not in ("standard", "box"):
+            raise ValueError(
+                f"scaling must be 'standard' or 'box', got {scaling!r}"
+            )
+        self.scaling = str(scaling)
+        # A polynomial basis wants a bounded argument; dividing by the standard
+        # deviation does not bound one. See guards.BoxScaler.
+        # Deliberately untyped: io.load rebinds this to an ArrayScaler, and a
+        # StandardScaler | BoxScaler union would make that assignment an error.
+        self.scaler_X: Any = (
+            StandardScaler() if scaling == "standard" else BoxScaler()
+        )
         self.scaler_Y = StandardScaler(with_std=self.standardize_Y_with_std)
 
         # in-place scaling transformation

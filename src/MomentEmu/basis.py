@@ -114,8 +114,11 @@ def _bounded_candidates(
     # (v * w_i) ** q is increasing in v for q > 0, so a prefix that is already
     # over the cap stays over and the ascending steps can be cut short.
     q_cap = None if q is None else (d + 1e-12) ** q * (1.0 + 1e-9)
-    # Concrete values for the closure below: an Optional captured by a nested
-    # function cannot be narrowed at its use site. q_cap stays the live flag.
+    # Concrete values for the descent below: an Optional captured by a nested
+    # function cannot be narrowed at its use site, and q_cap stays the live
+    # flag. build() already substitutes ones for a missing weight vector, so
+    # the None branch here cannot be reached from the public API and guards
+    # only against a future second caller.
     q_exp: float = 1.0 if q is None else float(q)
     q_w: list[float] = [1.0] * n if weights is None else [float(x) for x in weights]
     # owed[i]: the least degree positions i..n-1 must still consume.

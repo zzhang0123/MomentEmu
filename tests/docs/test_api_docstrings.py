@@ -5,9 +5,22 @@ import inspect
 from pathlib import Path
 
 import MomentEmu
-from MomentEmu import core, emulator, guards, io, monomials
+from MomentEmu import (
+    basis,
+    core,
+    emulator,
+    factored,
+    guards,
+    io,
+    monomials,
+    precondition,
+    rotation,
+    sparse,
+    warp,
+)
 
-MODULES = [MomentEmu, emulator, core, io, monomials, guards]
+MODULES = [MomentEmu, emulator, core, io, monomials, guards, basis,
+           rotation, warp, factored, sparse, precondition]
 
 
 def _missing():

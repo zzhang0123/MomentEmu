@@ -161,6 +161,39 @@ def _in_warped_coordinates(jacobian, warp, X_raw):
     return J / warp.derivative(X_raw)[:, None, :]
 
 
+DEGREE_KNOBS = ("max_degree_forward", "init_deg_forward", "RMSE_tol")
+
+
+def _report_degree_gap(emulator, kwargs, scan_degree: int) -> None:
+    """Say so when the fitted degree falls short of ``scan_degree`` by default.
+
+    ``scan_degree`` chooses the ORDER and deliberately does not raise the
+    degree of the model finally fitted; see the class docstring for the
+    measurement that keeps them apart. But a caller who sets it, receives a
+    much smaller model and reads no complaint has no reason to look for the
+    second keyword: on the 21cmGEM backend that gap was degree 6 at 462 terms
+    against degree 12 at 6,188, a factor of 3.4 in test error.
+
+    Only the case where every inner degree knob is at its default is reported,
+    because that is the only one where the caller cannot have meant it.
+    """
+    if any(kwargs.get(k) is not None for k in DEGREE_KNOBS):
+        return
+    fitted = getattr(emulator, "forward_degree", None)
+    if fitted is None or int(fitted) >= int(scan_degree):
+        return
+    warnings.warn(
+        f"scan_degree={scan_degree} chose the order; the fit settled at degree "
+        f"{int(fitted)}. scan_degree does not raise the inner degree -- the "
+        f"knobs that do are {', '.join(DEGREE_KNOBS)}. Do not simply set "
+        f"max_degree_forward=scan_degree: a longer ladder can make PolyEmu "
+        f"select a LOWER rung (degree 12 at 17.93 percent became degree 10 at "
+        f"20.24 percent on one target). Raise them one at a time and measure.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 class PreconditionedEmu:
     """Forward emulator on rotated and/or warped inputs, order chosen by data.
 
@@ -424,6 +457,7 @@ class PreconditionedEmu:
         self.emulator: Any
         if self.estimator == "polynomial":
             self.emulator = PolyEmu(A, Y, **kwargs)
+            _report_degree_gap(self.emulator, kwargs, int(scan_degree))
         elif self.estimator == "sparse":
             from MomentEmu.sparse import SparseEmu
 

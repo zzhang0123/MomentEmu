@@ -260,6 +260,25 @@ def apply_ridge(M, ridge: float):
     samples of an effectively two-dimensional target, cond(M) is 2.3e21 and the
     unregularised Cholesky returns NaN, while a ridge of 1e-12 returns a model
     with a held-out error of 1.1e-3.
+
+    When it is worth reaching for, the axis is SAMPLES PER COEFFICIENT, not
+    the condition number. At many samples per coefficient there is nothing to
+    regularise and the parameter does nothing whatever cond(M) says: on the
+    21cmGEM backend at degree 6, 462 coefficients against 24,562 samples --
+    53 each -- a sweep over nine values moved the test error not at all. The
+    same target at degree 12 is 6,188 coefficients against the same samples,
+    four each, and the sweep has a clean interior optimum:
+
+        ridge      test error
+        0          1.4136 %
+        1e-12      1.2352 %
+        1e-10      1.1435 %
+        1e-8       1.0868 %
+        1e-6       1.2607 %
+
+    An interior optimum is the signature of a bias-variance trade rather than
+    a conditioning patch, so a value found this way is a property of the
+    design and the basis size, not of the arithmetic.
     """
     M = np.asarray(M, dtype=np.float64)
     ridge = float(ridge)

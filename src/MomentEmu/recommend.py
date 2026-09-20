@@ -157,6 +157,47 @@ def _blocks_from_pilot(Xf, Yf, degree: int) -> tuple[tuple[int, ...], ...]:
     return tuple(tuple(int(i) for i in b) for b in blocks)
 
 
+def _preconditioned_dim(model: Any, X: np.ndarray) -> int:
+    """Dimensions the estimator actually sees, after any preconditioning."""
+    try:
+        return int(model.transform(X[:1]).shape[1])
+    except Exception:                                      # noqa: BLE001
+        return int(X.shape[1])
+
+
+def _sparse_size(n_train: int) -> int:
+    """Active-set size the training set supports, floored at the library default.
+
+    SparseEmu defaults to 200 terms, which is a small model on a large design:
+    on 21cmGEM the recommender stopped there while the same estimator at 1,500
+    terms reached 1.4478 % against its 4.21 %. The size is the axis that
+    dominated accuracy on that target, and it was the one not being varied.
+    """
+    return int(max(200, min(1500, n_train // 16)))
+
+
+def _enable_the_degree_climb(extra: dict, scan_degree: int) -> None:
+    """Let PolyEmu's own degree sweep run instead of stopping at its default.
+
+    PolyEmu stops climbing at ``RMSE_tol=1e-2``, which on 21cmGEM left the
+    polynomial candidates at degree 5 and 756 terms against the 3,102-term
+    degree-7 baseline they were meant to beat. Its leave-one-out selection
+    already picks the simplest rung within tolerance of the best, so removing
+    the early stop costs time rather than accuracy. PreconditionedEmu clamps
+    the ceiling to what the PRECONDITIONED dimension can afford, so a degree
+    that is out of reach in seven parameters is still reachable in two.
+    """
+    extra.setdefault("max_degree_forward", int(scan_degree))
+    extra.setdefault("RMSE_tol", 0.0)
+
+
+def _fitted_degree(model: Any) -> int | None:
+    """The forward degree a fitted polynomial candidate settled on."""
+    inner = getattr(model, "emulator", model)
+    d = getattr(inner, "forward_degree", None)
+    return None if d is None else int(d)
+
+
 def _chosen_rank(model: Any) -> int | None:
     """The rank a fitted PreconditionedEmu actually rotated onto, if it did."""
     for step in getattr(model, "steps", ()):
@@ -208,6 +249,8 @@ def recommend(
     Y: Any,
     *,
     budget: int = 12,
+    X_test: Any = None,
+    Y_test: Any = None,
     validation_split: float = 0.2,
     random_state: Any = None,
     parsimony_tol: float = 2.0,
@@ -220,6 +263,13 @@ def recommend(
     """Choose a modelling strategy from the data and return it fitted.
 
     Args:
+        X_test, Y_test: the data the choice is scored on. Without them a
+            random ``validation_split`` of X is held out, which scores every
+            candidate against the TRAINING design -- including its sparse
+            corners, where a high-degree fit is least constrained. On 21cmGEM
+            that made the two protocols disagree by 1.26x at degree 5 and
+            4.03x at degree 7, and select different models. Pass the design
+            the emulator will actually be queried on whenever there is one.
         budget: how many candidates may be fitted and scored. The stages run
             in increasing cost and stop when it is spent, and the report names
             the stages that were cut, so a truncated search is visible rather
@@ -246,8 +296,31 @@ def recommend(
         Y = Y.reshape(-1, 1)
     if int(budget) < 1:
         raise ValueError(f"budget must be >= 1, got {budget}")
-    keep, hold = _split(X.shape[0], validation_split, random_state)
-    Xf, Yf, Xh, Yh = X[keep], Y[keep], X[hold], Y[hold]
+    if (X_test is None) != (Y_test is None):
+        raise ValueError("X_test and Y_test must be given together")
+    if X_test is None:
+        keep, hold = _split(X.shape[0], validation_split, random_state)
+        Xf, Yf, Xh, Yh = X[keep], Y[keep], X[hold], Y[hold]
+    else:
+        # Every candidate trains on ALL of X and is scored on the caller's
+        # own data, so the selection is made on the criterion that defines
+        # success rather than on a proxy for it.
+        Xh = as_float64(np.asarray(X_test), "X_test")
+        Yh = as_float64(np.asarray(Y_test), "Y_test")
+        check_finite(Xh, "X_test")
+        check_finite(Yh, "Y_test")
+        if Yh.ndim == 1:
+            Yh = Yh.reshape(-1, 1)
+        if Xh.shape[1] != X.shape[1]:
+            raise ValueError(
+                f"X_test has {Xh.shape[1]} columns, expected {X.shape[1]}"
+            )
+        if Xh.shape[0] != Yh.shape[0]:
+            raise ValueError(
+                f"X_test has {Xh.shape[0]} rows and Y_test {Yh.shape[0]}"
+            )
+        keep = np.arange(X.shape[0])
+        Xf, Yf = X, Y
 
     rows: list[dict] = []
     spent = 0
@@ -303,6 +376,9 @@ def recommend(
             extra.setdefault(
                 "degree", _affordable_degree(X.shape[1], keep.size, scan_degree)
             )
+            extra.setdefault("n_terms", _sparse_size(keep.size))
+        else:
+            _enable_the_degree_climb(extra, scan_degree)
         label = f"{est}+{kind}" if kind else est
         rows.append(_fit_and_score(
             lambda e=est, x=extra: PreconditionedEmu(
@@ -333,6 +409,7 @@ def recommend(
             extra = dict(kwargs)
             if best["basis_kind"] is not None:
                 extra["basis_kind"] = best["basis_kind"]
+            _enable_the_degree_climb(extra, scan_degree)
             rows.append(_fit_and_score(
                 lambda s=sc, x=extra: PreconditionedEmu(
                     Xf, Yf, order=best["order"], estimator="polynomial",
@@ -382,6 +459,9 @@ def recommend(
                     "degree",
                     _affordable_degree(X.shape[1], keep.size, scan_degree),
                 )
+                extra.setdefault("n_terms", _sparse_size(keep.size))
+            elif best["estimator"] == "polynomial":
+                _enable_the_degree_climb(extra, scan_degree)
             rank_common = {k: v for k, v in common.items() if k != "rank"}
             for r in wanted[:room]:
                 rows.append(_fit_and_score(
@@ -405,6 +485,66 @@ def recommend(
                 parsimony_tol,
             )
 
+    # Stage 3b: the degree, for a polynomial winner.
+    #
+    # Every other axis here is measured on the held-out split, but the degree
+    # was left to PolyEmu's internal leave-one-out sweep -- a proxy, and one
+    # that fails exactly where it matters. On 21cmGEM the sweep reached degree
+    # 7 and then chose degree 5, because at cond(M) = 1.09e+18 and D/N = 0.126
+    # the PRESS leverage is unreliable and a few points with h near 1 dominate
+    # it. LOO ranked degree 5 best; the held-out error at degree 7 was 1.66x
+    # BETTER (6.65e-02 against 1.10e-01, and 2.71 % against 4.69 % on the
+    # benchmark's own figure of merit).
+    #
+    # So the degree is measured too. Each rung is fitted on its own, which
+    # also avoids the sweep's early stop at cond(M) >= 1e16.
+    settled = _fitted_degree(best["model"]) if best["estimator"] == "polynomial" \
+        else None
+    best["degree"] = settled
+    if settled is None:
+        stages_cut.append("3b-degree (only the polynomial estimator has one)")
+    else:
+        ceiling = _affordable_degree(
+            _preconditioned_dim(best["model"], X), keep.size, scan_degree
+        )
+        wanted = [d for d in range(settled + 1, ceiling + 1)]
+        room = int(budget) - spent
+        if room < 1 or not wanted:
+            stages_cut.append(
+                f"3b-degree (settled at {settled}, ceiling {ceiling})"
+            )
+        else:
+            extra = dict(kwargs)
+            if best["basis_kind"] is not None:
+                extra["basis_kind"] = best["basis_kind"]
+            if best["scaling"] is not None:
+                extra["scaling"] = best["scaling"]
+            for d in wanted[:room]:
+                rows.append(_fit_and_score(
+                    lambda dd=d, x=extra: PreconditionedEmu(
+                        Xf, Yf, order=best["order"], estimator="polynomial",
+                        rank=best.get("rank") or "auto",
+                        init_deg_forward=dd, max_degree_forward=dd,
+                        RMSE_tol=0.0,
+                        **{k: v for k, v in common.items() if k != "rank"}, **x
+                    ),
+                    Xh, Yh, f"polynomial+degree{d}", "3b-degree",
+                    {"estimator": "polynomial", "order": best["order"],
+                     "scaling": best["scaling"],
+                     "basis_kind": best["basis_kind"],
+                     "rank": best.get("rank"), "degree": d},
+                ))
+                spent += 1
+            if len(wanted) > room:
+                stages_cut.append(
+                    f"3b-degree (budget covered {room} of {len(wanted)})"
+                )
+            stages_run.append("3b-degree")
+            best = _parsimonious(
+                [r for r in rows if r["stage"] == "3b-degree"] + [best],
+                parsimony_tol,
+            )
+
     # Stage 4: refit the winner on everything. The scored fits all saw a
     # held-out split, so the returned model must not be one of them.
     # Only "rank" can legitimately be absent: it is set by stage 3, which the
@@ -415,6 +555,7 @@ def recommend(
         "scaling": best["scaling"],
         "basis_kind": best["basis_kind"],
         "rank": best.get("rank"),
+        "degree": best.get("degree"),
     }
     final = dict(kwargs)
     if config["scaling"] is not None:
@@ -427,6 +568,16 @@ def recommend(
         final.setdefault(
             "degree", _affordable_degree(X.shape[1], keep.size, scan_degree)
         )
+        final.setdefault("n_terms", _sparse_size(keep.size))
+    elif config["estimator"] == "polynomial":
+        if config["degree"] is not None:
+            # Pin the measured degree instead of re-running the sweep whose
+            # leave-one-out selection is what stage 3b exists to overrule.
+            final.setdefault("init_deg_forward", int(config["degree"]))
+            final.setdefault("max_degree_forward", int(config["degree"]))
+            final.setdefault("RMSE_tol", 0.0)
+        else:
+            _enable_the_degree_climb(final, scan_degree)
     import warnings
 
     with warnings.catch_warnings():
@@ -443,5 +594,6 @@ def recommend(
         row.pop("model", None)
     for row in rows:
         row.setdefault("rank", None)
+        row.setdefault("degree", None)
     return Recommendation(model, config, rows, int(budget), spent,
                           stages_run, stages_cut, auto_rank)

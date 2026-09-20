@@ -34,6 +34,7 @@ jax.config.update("jax_enable_x64", True)
 from MomentEmu.jax_momentemu import JaxEmulator  # noqa: E402
 
 TENSOR_BASES = ("legendre", "chebyshev")
+ALL_BASES = TENSOR_BASES + ("monomial",)
 
 
 def _design(n=500, seed=0):
@@ -52,7 +53,7 @@ def _fit(basis_kind: str, **kwargs):
                          basis_kind=basis_kind, **kwargs), X, Y
 
 
-@pytest.mark.parametrize("basis_kind", TENSOR_BASES)
+@pytest.mark.parametrize("basis_kind", ALL_BASES)
 def test_a_sparse_fit_exports_and_agrees_with_the_numpy_model(basis_kind: str):
     emu, X, _Y = _fit(basis_kind)
     jemu = JaxEmulator.from_sparse(emu)
@@ -61,7 +62,7 @@ def test_a_sparse_fit_exports_and_agrees_with_the_numpy_model(basis_kind: str):
                                rtol=1e-11, atol=1e-12)
 
 
-@pytest.mark.parametrize("basis_kind", TENSOR_BASES)
+@pytest.mark.parametrize("basis_kind", ALL_BASES)
 def test_from_polyemu_accepts_a_sparse_fit_too(basis_kind: str):
     """Callers reach for the name they know; it must not raise AttributeError."""
     emu, X, _Y = _fit(basis_kind)
@@ -72,7 +73,7 @@ def test_from_polyemu_accepts_a_sparse_fit_too(basis_kind: str):
     )
 
 
-@pytest.mark.parametrize("basis_kind", TENSOR_BASES)
+@pytest.mark.parametrize("basis_kind", ALL_BASES)
 def test_the_exported_jacobian_matches_finite_differences(basis_kind: str):
     emu, X, _Y = _fit(basis_kind)
     jemu = JaxEmulator.from_sparse(emu)
@@ -88,7 +89,7 @@ def test_the_exported_jacobian_matches_finite_differences(basis_kind: str):
     np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-7)
 
 
-@pytest.mark.parametrize("basis_kind", TENSOR_BASES)
+@pytest.mark.parametrize("basis_kind", ALL_BASES)
 def test_a_batch_goes_through_vmap(basis_kind: str):
     """The reason the export is wanted: batched evaluation."""
     emu, X, _Y = _fit(basis_kind)
@@ -98,10 +99,52 @@ def test_a_batch_goes_through_vmap(basis_kind: str):
                                rtol=1e-11, atol=1e-12)
 
 
-def test_a_monomial_sparse_fit_says_why_it_cannot_be_exported():
+def test_a_monomial_export_diverges_outside_the_box_like_numpy():
+    """The clip belongs to the tensor families, not to the shared path.
+
+    A monomial fit describes a diverging model outside its training box. If
+    the export clipped, it would agree inside the box and describe a different
+    model outside it, which is the failure mode T-007 found in the Torch
+    backend: plausible numbers from the wrong basis.
+    """
     emu, _X, _Y = _fit("monomial")
-    with pytest.raises(NotImplementedError, match="downward closed"):
-        JaxEmulator.from_sparse(emu)
+    far = np.array([[2.5, -3.0, 2.0]])
+    got = np.asarray(JaxEmulator.from_sparse(emu)(far))
+    ref = emu.forward_emulator(far)
+    np.testing.assert_allclose(got, ref, rtol=1e-9, atol=1e-10)
+    edge = np.asarray(JaxEmulator.from_sparse(emu)(np.array([[1.0, 1.0, 1.0]])))
+    assert np.abs(got).max() > 5.0 * np.abs(edge).max(), (
+        "the monomial export saturated; it is being clipped"
+    )
+
+
+@pytest.mark.parametrize("basis_kind", TENSOR_BASES)
+def test_a_tensor_export_still_saturates_outside_the_box(basis_kind: str):
+    emu, _X, _Y = _fit(basis_kind)
+    far = np.array([[2.5, -3.0, 2.0]])
+    np.testing.assert_allclose(
+        np.asarray(JaxEmulator.from_sparse(emu)(far)),
+        emu.forward_emulator(far), rtol=1e-9, atol=1e-10,
+    )
+
+
+def test_a_dense_monomial_fit_still_uses_the_closure_path():
+    """Regression: the shared path must not take over the dense route.
+
+    The closure walk is the faster one for a downward-closed set, and it is
+    what every existing PolyEmu export uses.
+    """
+    from MomentEmu.emulator import PolyEmu
+
+    X, Y = _design()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dense = PolyEmu(X, Y, init_deg_forward=4, max_degree_forward=4,
+                        RMSE_tol=0.0, verbose=0)
+    jemu = JaxEmulator.from_polyemu(dense)
+    assert jemu.level_sizes, "the dense export lost its closure tables"
+    np.testing.assert_allclose(np.asarray(jemu(X)), dense.forward_emulator(X),
+                               rtol=1e-10, atol=1e-11)
 
 
 def test_the_selected_index_set_really_is_not_downward_closed():

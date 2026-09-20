@@ -46,6 +46,8 @@ def _one_dimensional_table(z, family, table_degree):
     other through the numpy fit, because a silent divergence here returns
     plausible numbers from the wrong basis.
     """
+    if family not in ("monomial", "legendre", "chebyshev"):
+        raise NotImplementedError(f"no 1-D recurrence for basis {family!r}")
     columns = [jnp.ones_like(z)]
     if table_degree >= 1:
         columns.append(z)
@@ -53,6 +55,10 @@ def _one_dimensional_table(z, family, table_degree):
         if family == "legendre":
             # (k+1) P_{k+1} = (2k+1) z P_k - k P_{k-1}
             nxt = ((2 * k + 1) * z * columns[k] - k * columns[k - 1]) / (k + 1)
+        elif family == "monomial":
+            # z^{k+1} = z * z^k. Named rather than left to the else, which
+            # would have evaluated monomials with the Chebyshev recurrence.
+            nxt = z * columns[k]
         else:
             # T_{k+1} = 2 z T_k - T_{k-1}
             nxt = 2.0 * z * columns[k] - columns[k - 1]
@@ -67,11 +73,14 @@ def _one_dimensional_table(z, family, table_degree):
 def _tensor_design(Xs, multi_indices, family, table_degree, n_params):
     """``(N, D)`` design for a tensor-product basis, ``prod_i p_{alpha_i}(z_i)``.
 
-    The argument is clipped to [-1, 1] exactly as ``_TensorPlan`` does, so the
-    basis saturates outside the training box rather than diverging. The
-    caller's extrapolation guard still reports the excursion.
+    The argument is clipped to [-1, 1] for the families ``_TensorPlan``
+    clips, so the basis saturates outside the training box rather than
+    diverging, and the caller's extrapolation guard still reports the
+    excursion. Monomials are NOT clipped: ``MonomialPlan`` does not, and a
+    monomial fit describes a diverging model out there. Clipping them would
+    agree inside the box and describe a different model outside it.
     """
-    Z = jnp.clip(Xs, -1.0, 1.0)
+    Z = Xs if family == "monomial" else jnp.clip(Xs, -1.0, 1.0)
     out = jnp.ones((Z.shape[0], multi_indices.shape[0]), dtype=Xs.dtype)
     for i in range(n_params):
         table = _one_dimensional_table(Z[:, i], family, table_degree)
@@ -147,7 +156,11 @@ class JaxEmulator:
         Xs = (X - self.input_mean) / self.input_scale
         # basis_family is static metadata, so this branch is resolved at trace
         # time and the unused path never reaches the graph.
-        if self.basis_family == "monomial":
+        # The closure walk needs a DOWNWARD CLOSED index set. A dense fit has
+        # one and carries its level tables; a sparse selection does not, which
+        # is what sparsity means, and arrives with none. Branch on the tables
+        # rather than on the family, so both reach the right path.
+        if self.basis_family == "monomial" and self.level_sizes:
             N = Xs.shape[0]
             Dc = self.closure_parent.shape[0]
             buf = jnp.ones((Dc, N), dtype=self.dtype)
@@ -219,30 +232,17 @@ class JaxEmulator:
     def from_sparse(cls, emulator, *, dtype=None):
         """Export a :class:`MomentEmu.sparse.SparseEmu` fitted in a tensor basis.
 
-        The monomial family is refused rather than exported. This kernel
-        evaluates monomials from the downward-closed level tables a
-        ``MonomialPlan`` carries, and a SELECTED index set is not downward
-        closed -- that is what sparsity means. Rebuilding the closure would
-        put back exactly the terms the selection removed, so the fit that
-        arrived would not be the fit that is evaluated.
-
-        A tensor family needs no closure: it is evaluated from its
-        multi-indices and its own recurrence, which is the path T-007 added.
+        Every family goes through the multi-index path, not the closure walk.
+        A SELECTED index set is not downward closed -- that is what sparsity
+        means -- and the closure walk needs one; rebuilding it would put back
+        exactly the terms the selection removed, so the fit that arrived would
+        not be the fit evaluated.
         """
         from MomentEmu.emulator import BASIS_PLANS
         from MomentEmu.monomials import fold_output_affine
 
         dtype = _resolve_dtype(dtype)
         family = str(getattr(emulator, "basis_kind", "legendre"))
-        if family == "monomial":
-            raise NotImplementedError(
-                "a sparse monomial fit cannot be exported: this kernel "
-                "evaluates monomials from downward closed level tables, and a "
-                "selected index set is not downward closed, so rebuilding the "
-                "closure would restore the terms the selection removed. Refit "
-                "with basis_kind='legendre' or 'chebyshev', which are "
-                "evaluated from their multi-indices."
-            )
         mi = np.asarray(emulator.multi_indices, dtype=np.int64)
         plan_cls: Any = BASIS_PLANS[family]
         plan = plan_cls.build(mi)

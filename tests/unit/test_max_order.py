@@ -91,3 +91,37 @@ def test_backward_fit_stays_under_half_N():
     emu = PolyEmu(X, Y, forward=False, backward=True)
     D = emu.backward_multi_indices.shape[0]
     assert D * 2 <= N
+
+
+# The backward D >= N_train refusal, at the threshold. Holding n_outputs = 3
+# and max_degree_backward = 5 fixes D = basis_size(3, 5) = 56 and keeps the
+# degree above max_supported_degree(3, N) = 3 for both N below, so the only
+# thing that differs between the two cells is the D >= N_train comparison.
+def test_explicit_backward_degree_with_D_ge_N_raises():
+    rng = np.random.default_rng(4)
+    N, m = 56, 3
+    X = rng.uniform(-1.0, 1.0, (N, 1))
+    Y = rng.uniform(0.0, 1.0, (N, m))
+    assert max_supported_degree(m, N, fill=2.0) == 3  # degree 5 clears the cap
+    assert basis_size(m, 5) == N                      # D == N_train exactly
+    with pytest.raises(ValueError) as excinfo:
+        PolyEmu(X, Y, forward=False, backward=True, max_degree_backward=5)
+    msg = str(excinfo.value)
+    assert "max_degree_backward = 5" in msg
+    assert "D = 56" in msg        # basis_size(3, 5)
+    assert "N_train = 56" in msg
+    assert "largest admissible degree is 3" in msg
+
+
+def test_backward_degree_above_cap_is_allowed_while_D_stays_below_N():
+    rng = np.random.default_rng(5)
+    N, m = 57, 3
+    X = rng.uniform(-1.0, 1.0, (N, 1))
+    Y = rng.uniform(0.0, 1.0, (N, m))
+    assert max_supported_degree(m, N, fill=2.0) == 3  # same cap as above
+    assert basis_size(m, 5) < N                       # one row below the refusal
+    # Degrees past the 2x fill margin warn but stay identifiable, so the sweep
+    # runs and scores them instead of refusing.
+    with pytest.warns(UserWarning, match="barely determined"):
+        emu = PolyEmu(X, Y, forward=False, backward=True, max_degree_backward=5)
+    assert emu.backward_multi_indices.shape[0] < N

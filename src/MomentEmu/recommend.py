@@ -385,9 +385,9 @@ def recommend(
             rank_common = {k: v for k, v in common.items() if k != "rank"}
             for r in wanted[:room]:
                 rows.append(_fit_and_score(
-                    lambda rr=r, x=extra: PreconditionedEmu(
+                    lambda rr=r, x=extra, rc=rank_common: PreconditionedEmu(
                         Xf, Yf, order=best["order"], estimator=best["estimator"],
-                        rank=rr, **rank_common, **x
+                        rank=rr, **rc, **x
                     ),
                     Xh, Yh, f"{best['estimator']}+rank{r}", "3-rank",
                     {"estimator": best["estimator"], "order": best["order"],

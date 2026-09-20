@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from MomentEmu.guards import (
+    COND_PHI_WARN,
     COND_QR,
     COND_RAISE,
     COND_WARN,
@@ -68,6 +69,55 @@ def cholesky_qr2_solve(Phi, Y):
     return solve_triangular(R1, a, lower=True, trans="T", check_finite=False)
 
 
+def triangular_cond(R) -> float:
+    """1-norm condition estimate of an upper-triangular factor, via LAPACK.
+
+    For ``Phi = Q R`` this estimates ``cond(Phi)``, which is what the accuracy
+    of a QR solve depends on. It costs O(D^2) against the QR's O(N D^2), and
+    on a 1-D monomial design it tracked the true 2-norm condition number to
+    within a factor 1.92 to 2.21 over eight decades (1e8 to 1e16).
+    """
+    from scipy.linalg import lapack
+
+    R = np.asarray(R, dtype=np.float64)
+    if R.ndim != 2 or R.shape[0] != R.shape[1]:
+        raise ValueError(f"R must be square, got shape {R.shape}")
+    if R.shape[0] == 0:
+        return 1.0
+    if not np.isfinite(R).all():
+        return float("inf")
+    rcond, info = lapack.dtrcon(np.asfortranarray(R), uplo="U", diag="N", norm="1")
+    if info != 0 or not np.isfinite(rcond) or rcond <= 0.0:
+        return float("inf")
+    return float(1.0 / rcond)
+
+
+def _report_cond_phi(R, warn_at: float = COND_PHI_WARN) -> float:
+    """Return cond(Phi) from the triangular factor, warning when it is dire.
+
+    This reports; it does not refuse. Whether a fit is usable is decided by the
+    held-out or leave-one-out error the caller already computes, not by a proxy
+    -- and a cond ceiling would have to refuse AFTER the factorisation anyway,
+    so it saves nothing while discarding a model that may be fine. Measured on
+    a 1-D monomial design, brute-force LOO RMSE was 2.90e-03 at cond(Phi) =
+    3.7e12 and 2.26e-03 at 4.4e15, so the bad region is not where cond alone
+    would put it.
+    """
+    cond_phi = triangular_cond(R)
+    if cond_phi < warn_at:
+        return cond_phi
+    digits = max(0.0, 15.7 - np.log10(cond_phi)) if np.isfinite(cond_phi) else 0.0
+    warnings.warn(
+        f"cond(Phi) = {cond_phi:.2e}: the QR solve keeps about {digits:.1f} of "
+        f"15.7 float64 digits. The cond(M) estimate understates this, because "
+        f"it saturates near 1/eps. Judge the fit by its held-out or LOO error; "
+        f"if it is poor, lower the degree, add distinct samples or set ridge > 0.",
+        IllConditionedWarning,
+        stacklevel=3,
+    )
+    return cond_phi
+
+
 def normal_equation_factor(
     M, phi_factory=None, *, n_samples, cond, qr_at=COND_QR, ridge=0.0,
     weighted=False,
@@ -118,6 +168,7 @@ def normal_equation_factor(
         except np.linalg.LinAlgError as exc:
             failure = exc
             continue
+        _report_cond_phi(U)
         return U / np.sqrt(float(n_samples)), False, "qr"
     raise failure or np.linalg.LinAlgError("no factorisation of M succeeded")
 
@@ -370,7 +421,7 @@ def press_loo(
             ridge=ridge, weighted=weights is not None,
         )
     except np.linalg.LinAlgError as exc:
-        msg = (
+        msg = str(exc) if isinstance(exc, IllConditionedError) else (
             f"neither the Cholesky of the {M.shape[0]}x{M.shape[1]} moment "
             f"matrix nor a QR of the design could factor it; the LOO leverage "
             f"is undefined."

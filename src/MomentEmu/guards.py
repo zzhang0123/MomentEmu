@@ -38,6 +38,13 @@ COND_RAISE = 1e16        # beyond 1/eps: M numerically singular
 # cond_est 1.7e13 and 230x worse at 2.0e15, both below COND_RAISE, while every
 # rung at or above COND_RAISE was already accurate because QR fired there.
 COND_QR = 1e13
+# Warn (never refuse) once a QR solve has few digits left. Stated on cond(Phi),
+# because the accuracy of a QR solve depends on cond(Phi) and not on cond(M).
+# It is not redundant with COND_WARN: above cond(M) ~ 1e16 the smallest
+# eigenvalue of the COMPUTED M is round-off, so the cond(M) estimate saturates
+# near 1/eps and understates the damage (5.9e8 reported at both
+# cond(Phi) = 1.1e11 and cond(Phi) = 1.3e14).
+COND_PHI_WARN = 1e12
 SWEEP_BLOWUP_FACTOR = 10.0
 COLLINEAR_RTOL = 1e-12
 

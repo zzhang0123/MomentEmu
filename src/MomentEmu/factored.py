@@ -111,7 +111,16 @@ class FactoredEmu:
         self.rank = rank
         self.degrees = tuple(degrees)
         Xs, self.mean_X_, self.scale_X_ = _standardise(X)
-        Ys, self.mean_Y_, self.scale_Y_ = _standardise(Y)
+        # Outputs are SCALED but not centred. Subtracting the mean turns
+        # prod_k f_k into prod_k f_k - c, which is not a product and needs one
+        # extra rank to represent: on an exactly rank-one target, centring
+        # left rank 1 at a test error of 7.0e-2 while rank 2 reached 6e-5.
+        # Per-output scaling is harmless by contrast, because a per-column
+        # factor is absorbed by the output weights.
+        self.mean_Y_ = np.zeros(Y.shape[1])
+        yscale = np.sqrt(np.mean(Y ** 2, axis=0))
+        self.scale_Y_ = np.where(yscale > 0.0, yscale, 1.0)
+        Ys = Y / self.scale_Y_
         self.plans = [
             MonomialPlan.build(generate_multi_indices(len(b), d))
             for b, d in zip(blocks, degrees)

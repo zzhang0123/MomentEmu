@@ -180,3 +180,64 @@ def test_validation(rotated, kwargs, match):
     with pytest.raises(ValueError, match=match):
         PreconditionedEmu(X[:2000], Y[:2000], rank=2, max_degree_forward=3,
                           verbose=0, **kwargs)
+
+
+# --- composing with the other estimators ----------------------------------
+
+def test_sparse_estimator_composes_with_a_rotation(rotated):
+    """The natural partner: a rotation cuts the dimension, which is what makes
+    a large candidate set affordable in the first place."""
+    from MomentEmu.basis import Basis
+
+    X, Y, Xte, Yte = rotated
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        emu = PreconditionedEmu(
+            X, Y, order="rotate", rank=2, random_state=0,
+            estimator="sparse", candidate=Basis(degree=20, max_interaction=2),
+            degree=20, n_terms=40,
+        )
+    rep = emu.report()
+    assert rep["estimator"] == "sparse" and rep["n_dims"] == 2
+    assert rep["n_terms"] == 40
+    # no extrapolation= here: keywords go to the estimator, and SparseEmu
+    # has no such argument
+    pred = emu.forward_emulator(Xte)
+    err = float(np.sqrt(np.mean((pred - Yte) ** 2)) / np.sqrt(np.mean(Yte ** 2)))
+    assert err < 0.2, err
+
+
+def test_factored_estimator_refuses_to_follow_a_rotation(rotated):
+    """A rotation replaces the parameters by linear combinations, so a block
+    partition of the originals stops referring to anything."""
+    X, Y, _, _ = rotated
+    with pytest.raises(ValueError, match="cannot follow a rotation"):
+        PreconditionedEmu(X, Y, order="rotate", rank=2, random_state=0,
+                          estimator="factored", blocks=((0,), (1,)))
+
+
+def test_factored_estimator_works_without_a_rotation():
+    """Warping is per axis, so it leaves a block partition meaningful."""
+    rng = np.random.default_rng(4)
+    X = rng.uniform(-1, 1, (6000, 6))
+    blocks = ((0, 1, 2), (3, 4, 5))
+    Y = ((1.2 + np.sin(0.9 * X[:, 0] + 0.7 * X[:, 1] + 0.5 * X[:, 2]))
+         * (1.6 + 0.5 * np.exp(0.4 * (X[:, 3] + 0.8 * X[:, 4] + 0.6 * X[:, 5])))
+         ).reshape(-1, 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        emu = PreconditionedEmu(X, Y, order="none", estimator="factored",
+                                blocks=blocks, rank=1, degree=5,
+                                random_state=0)
+    rep = emu.report()
+    assert rep["estimator"] == "factored" and rep["n_dims"] == 6
+    pred = emu.forward_emulator(X[:500])
+    err = float(np.sqrt(np.mean((pred - Y[:500]) ** 2)) / np.sqrt(np.mean(Y ** 2)))
+    assert err < 1e-3, err
+
+
+def test_unknown_estimator_is_rejected(rotated):
+    X, Y, _, _ = rotated
+    with pytest.raises(ValueError, match="estimator must be"):
+        PreconditionedEmu(X[:1500], Y[:1500], order="none", estimator="magic",
+                          max_degree_forward=3, verbose=0)

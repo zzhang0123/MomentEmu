@@ -117,11 +117,16 @@ def test_restart_spread_is_reported(grid):
 
 
 def test_multi_output_is_supported(grid):
+    """The second column is 2*f + 1. An additive offset needs a rank slot of
+    its own, which the model can supply because every factor carries a
+    constant term, so this is rank 2 rather than rank 1. Centring the outputs
+    would not avoid it: it turns the FIRST column into a product minus a
+    constant and costs the same rank there instead."""
     Xtr, Xte = grid
     Ytr = np.column_stack([_product(Xtr), 2.0 * _product(Xtr) + 1.0])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        cp = FactoredEmu(Xtr, Ytr, BLOCKS, rank=1, degree=4, random_state=0)
+        cp = FactoredEmu(Xtr, Ytr, BLOCKS, rank=2, degree=4, random_state=0)
     pred = cp.forward_emulator(Xte)
     assert pred.shape == (Xte.shape[0], 2)
     ref = np.column_stack([_product(Xte), 2.0 * _product(Xte) + 1.0])
@@ -241,3 +246,22 @@ def test_separability_report_is_stable_across_the_usable_step_range():
         for s in (1e-9, 1e-7, 1e-5, 1e-4, 1e-3)
     }
     assert len(set(verdicts.values())) == 1, verdicts
+
+
+def test_outputs_are_scaled_but_not_centred():
+    """Subtracting the output mean turns prod_k f_k into prod_k f_k - c, which
+    is not a product and costs exactly one rank. With centring, an exactly
+    rank-one target left rank 1 at 7.0e-2 while rank 2 reached 6e-5."""
+    rng = np.random.default_rng(4)
+    X = rng.uniform(-1, 1, (6000, 6))
+    Y = ((1.2 + np.sin(0.9 * X[:, 0] + 0.7 * X[:, 1] + 0.5 * X[:, 2]))
+         * (1.6 + 0.5 * np.exp(0.4 * (X[:, 3] + 0.8 * X[:, 4] + 0.6 * X[:, 5])))
+         ).reshape(-1, 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = FactoredEmu(X, Y, ((0, 1, 2), (3, 4, 5)), rank=1, degree=6,
+                        random_state=0)
+    assert np.allclose(m.mean_Y_, 0.0), "outputs must not be centred"
+    pred = m.forward_emulator(X[:1000])
+    err = float(np.sqrt(np.mean((pred - Y[:1000]) ** 2)) / np.sqrt(np.mean(Y ** 2)))
+    assert err < 1e-3, err

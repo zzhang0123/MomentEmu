@@ -95,6 +95,25 @@ All notable changes to MomentEmu are documented here. The format follows
 
 ### Fixed
 
+- `FactoredEmu` centred its outputs, which cost exactly one rank. Subtracting
+  the mean turns `prod_k f_k` into `prod_k f_k - c`, and that is not a product:
+  on an exactly rank-one target, rank 1 reached only 7.0e-2 while rank 2
+  reached 6e-5. Outputs are now scaled but not centred, and the same target at
+  rank 1 reaches 6.0e-5. Per-output scaling is harmless by contrast, because a
+  per-column factor is absorbed by the output weights. An additive offset in
+  an output still needs a rank slot, which the model supplies because every
+  factor carries a constant term; centring did not avoid that, it moved the
+  cost onto the product instead.
+- `warp` offered a log transform only when an axis spanned a range ratio above
+  10. The gain from a log warp rises smoothly from 23x at a ratio of 2 to 691x
+  at 10, with no break anywhere, so the threshold blocked the warp exactly
+  where it paid and the scan settled for a much weaker sinh or kte substitute.
+  Removed: log is now offered whenever it is defined. Nothing is needed on the
+  other side, because the evidence margin already rejects a log that does not
+  help -- on a response polynomial in x rather than in log x, the scan returned
+  identity at every ratio up to 1000, where a log warp would have taken the
+  held-out error from 0.0000 to 0.0220.
+
 - `active_subspace` scaled each output column by its own standard deviation
   before accumulating the gradient covariance, which is wrong for the case
   this package targets: one quantity sampled at many points. It makes a

@@ -359,6 +359,20 @@ emu.order                                       # 'rotate_warp' or 'warp_rotate'
 emu.scores                                      # held-out error per candidate
 ```
 
+`estimator=` decides what fits the preconditioned inputs. `"sparse"` is the
+natural partner for a rotation, since the reduced dimension is what makes a
+large candidate set affordable. `"factored"` needs a block partition of the
+inputs and therefore cannot follow a rotation, which replaces the parameters by
+linear combinations and leaves the blocks referring to nothing; that case
+raises. Remaining keywords go to the estimator, so they are the estimator's own
+rather than a uniform set.
+
+```python
+emu = PreconditionedEmu(X, Y, order="rotate", rank=2, estimator="sparse",
+                        candidate=Basis(degree=20, max_interaction=2),
+                        degree=20, n_terms=40)
+```
+
 Each order is scored at the highest degree *it* can afford, not at one degree
 shared by all: comparing a two-dimensional fit and a seven-dimensional one at a
 degree the seven-dimensional one can reach would hide the benefit rotation

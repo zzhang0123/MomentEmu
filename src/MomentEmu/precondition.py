@@ -38,6 +38,7 @@ from MomentEmu.rotation import active_subspace, select_rank
 from MomentEmu.warp import fit_warps
 
 ORDERS = ("none", "warp", "rotate", "rotate_warp", "warp_rotate")
+ESTIMATORS = ("polynomial", "sparse", "factored")
 
 
 class _Rotate:
@@ -92,6 +93,19 @@ class PreconditionedEmu:
             model.
         rank, variance_target, pilot_degree: passed to the rotation.
         warp_kwargs: passed to :func:`MomentEmu.warp.fit_warps`.
+        estimator: what fits the preconditioned inputs. "polynomial" is a
+            PolyEmu; "sparse" is a SparseEmu, which composes with any
+            preconditioning and is the natural partner for a rotation, since
+            the reduced dimension makes a large candidate set affordable;
+            "factored" is a FactoredEmu, which needs a block partition of the
+            inputs and therefore cannot follow a rotation, because a rotation
+            replaces the parameters by linear combinations and the blocks stop
+            meaning anything. That case raises rather than fitting something
+            whose blocks refer to coordinates that no longer exist.
+
+            Remaining keywords go to the estimator, so they are the
+            estimator's, not a uniform set: ``extrapolation=`` on a prediction
+            reaches PolyEmu and is rejected by the other two.
         scan_degree: ceiling on the degree used when comparing orders. Each
             candidate is scored at the highest degree IT can afford, not at one
             degree shared by all: an order that cuts seven dimensions to two
@@ -115,6 +129,7 @@ class PreconditionedEmu:
         pilot_degree: int = 3,
         warp_kwargs: dict | None = None,
         scan_degree: int = 12,
+        estimator: str = "polynomial",
         select: str = "accuracy",
         parsimony_tol: float = 2.0,
         validation_split: float = 0.2,
@@ -128,6 +143,11 @@ class PreconditionedEmu:
         check_finite(Y, "Y")
         if Y.ndim == 1:
             Y = Y.reshape(-1, 1)
+        if estimator not in ESTIMATORS:
+            raise ValueError(
+                f"estimator must be one of {ESTIMATORS}, got {estimator!r}"
+            )
+        self.estimator = str(estimator)
         wk = dict(warp_kwargs or {})
         wk.setdefault("random_state", random_state)
 
@@ -182,8 +202,9 @@ class PreconditionedEmu:
         # The chosen order fixes the dimensionality, so a degree the caller
         # pinned for a reduced fit can be unreachable for a full one. Clamp
         # rather than raise, and say so.
+        self._n_in = int(X.shape[1])
         A = self.transform(X)
-        asked = kwargs.get("max_degree_forward")
+        asked = kwargs.get("max_degree_forward") if estimator == "polynomial" else None
         if asked is not None:
             affordable = _affordable_degree(A.shape[1], X.shape[0], int(asked))
             if affordable < int(asked):
@@ -199,7 +220,34 @@ class PreconditionedEmu:
                     kwargs["init_deg_forward"] = min(
                         int(kwargs["init_deg_forward"]), affordable
                     )
-        self.emulator = PolyEmu(A, Y, **kwargs)
+        # One of three estimator types, so the attribute is deliberately
+        # untyped rather than pinned to PolyEmu.
+        self.emulator: Any
+        if self.estimator == "polynomial":
+            self.emulator = PolyEmu(A, Y, **kwargs)
+        elif self.estimator == "sparse":
+            from MomentEmu.sparse import SparseEmu
+
+            kwargs.pop("max_degree_forward", None)
+            kwargs.pop("init_deg_forward", None)
+            kwargs.pop("RMSE_tol", None)
+            kwargs.pop("verbose", None)
+            self.emulator = SparseEmu(A, Y, **kwargs)
+        else:
+            from MomentEmu.factored import FactoredEmu
+
+            if any(isinstance(step, _Rotate) for step in self.steps):
+                raise ValueError(
+                    f"estimator='factored' cannot follow a rotation, and the "
+                    f"order chosen was {self.order!r}. A rotation replaces the "
+                    "parameters by linear combinations, so a block partition "
+                    "of the originals no longer refers to anything. Pass "
+                    "order='warp' or order='none', or use estimator='sparse'."
+                )
+            for dead in ("max_degree_forward", "init_deg_forward", "RMSE_tol",
+                         "verbose"):
+                kwargs.pop(dead, None)
+            self.emulator = FactoredEmu(A, Y, **kwargs)
 
     def transform(self, X: Any) -> np.ndarray:
         """Apply every step in order."""
@@ -217,9 +265,9 @@ class PreconditionedEmu:
             "scores": dict(self.scores),
             "scan_degrees": dict(self.scan_degrees),
             "dimensions": dict(getattr(self, "dimensions", {})),
-            "n_dims": int(self.emulator.n_params),
-            "n_terms": int(self.emulator.forward_multi_indices.shape[0]),
-            "degree": int(self.emulator.forward_degree),
+            "estimator": self.estimator,
+            "n_dims": int(self.transform(np.zeros((1, self._n_in))).shape[1]),
+            "n_terms": _term_count(self.emulator),
         }
 
 
@@ -258,3 +306,14 @@ def _score(A, Y, keep, hold, ceiling):
     c = np.linalg.lstsq(P, Y[keep], rcond=None)[0]
     V = plan.evaluate(2.0 * (A[hold] - lo) / span - 1.0)
     return float(np.sqrt(np.mean((V @ c - Y[hold]) ** 2))), degree
+
+
+def _term_count(model) -> int:
+    """Retained basis terms, whichever estimator produced them."""
+    mi = getattr(model, "forward_multi_indices", None)
+    if mi is not None:
+        return int(mi.shape[0])
+    mi = getattr(model, "multi_indices", None)
+    if mi is not None:
+        return int(mi.shape[0])
+    return int(getattr(model, "n_parameters", 0))

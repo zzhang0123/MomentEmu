@@ -204,7 +204,7 @@ def connected_components(adjacency: np.ndarray) -> tuple[tuple[int, ...], ...]:
     """Connected components of a boolean adjacency matrix, sorted.
 
     Shared by the additive (interaction_graph) and multiplicative
-    (multiplicative_blocks) structure detectors so both group parameters the
+    (separability_report) structure detectors so both group parameters the
     same way. Nodes are marked on push, not on pop, so no node is queued twice.
     """
     a = np.asarray(adjacency, dtype=bool)

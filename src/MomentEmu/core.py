@@ -68,6 +68,77 @@ def cholesky_qr2_solve(Phi, Y):
     return solve_triangular(R1, a, lower=True, trans="T", check_finite=False)
 
 
+def normal_equation_factor(
+    M, phi_factory=None, *, n_samples, cond, qr_at=COND_QR, ridge=0.0,
+    weighted=False,
+):
+    """Return ``(U, lower, route)`` with ``U^T U = M`` by the most accurate route.
+
+    ``cho_factor(M)`` squares ``cond(Phi)``. Above ``qr_at`` that costs more
+    digits than the factorisation has left, so take ``R`` from a QR of ``Phi``
+    instead: ``Phi = Q R`` gives ``R^T R = Phi^T Phi = N M``, so ``R / sqrt(N)``
+    factors the SAME matrix with twice the digits. CholeskyQR2 reaches that
+    ``R`` at normal-equations cost and is tried first; Householder QR is the
+    fallback, and is the only route left once the Cholesky of ``Phi^T Phi``
+    fails outright.
+
+    Two cases exclude the QR routes, because there ``M`` is not ``Phi^T Phi / N``
+    and a factor of ``Phi`` would factor the wrong matrix:
+
+    * ``ridge > 0``  -- ``M`` carries the added diagonal;
+    * ``weighted``   -- ``M`` carries the sample weights.
+
+    ``phi_factory`` is called only if a QR route is actually taken, so the
+    batched LOO path does not materialise ``Phi`` unless it must.
+    """
+    from scipy.linalg import cho_factor
+
+    M = np.asarray(M, dtype=np.float64)
+    qr_allowed = ridge == 0.0 and not weighted and phi_factory is not None
+    order = ("qr", "cholesky") if (qr_allowed and cond >= qr_at) else ("cholesky", "qr")
+    failure = None
+    for route in order:
+        if route == "cholesky":
+            try:
+                cf, lower = cho_factor(M, lower=False, check_finite=False)
+            except np.linalg.LinAlgError as exc:
+                failure = exc
+                continue
+            return cf, lower, "cholesky"
+        if not qr_allowed:
+            continue
+        Phi = phi_factory()
+        if Phi is None:
+            continue
+        Phi = np.asarray(Phi, dtype=np.float64)
+        if Phi.shape[0] < Phi.shape[1]:
+            continue  # underdetermined: R is not square and does not factor M
+        try:
+            U = _upper_factor_from_qr(Phi)
+        except np.linalg.LinAlgError as exc:
+            failure = exc
+            continue
+        return U / np.sqrt(float(n_samples)), False, "qr"
+    raise failure or np.linalg.LinAlgError("no factorisation of M succeeded")
+
+
+def _upper_factor_from_qr(Phi):
+    """Return upper ``U`` with ``U^T U = Phi^T Phi``, by CholeskyQR2 then QR."""
+    from scipy.linalg import solve_triangular
+
+    try:
+        # Phi = Q1 R1^T then Q1 = Q2 R2^T, so Phi = Q2 (R1 R2)^T and
+        # Phi^T Phi = (R1 R2)(R1 R2)^T; the upper factor is its transpose.
+        R1 = np.linalg.cholesky(Phi.T @ Phi)
+        Q1 = solve_triangular(R1, Phi.T, lower=True, check_finite=False).T
+        R2 = np.linalg.cholesky(Q1.T @ Q1)
+        return (R1 @ R2).T
+    except np.linalg.LinAlgError:
+        # The Gram matrix is not positive definite in float64; only a
+        # factorisation that never forms it is left.
+        return np.linalg.qr(Phi, mode="r")
+
+
 def qr_solve(Phi, Y, *, rcond=1e-12):
     """Householder QR least-squares solve; returns (coeffs, rank) (P5.4).
 
@@ -251,7 +322,7 @@ def press_loo(
     Returns (coeffs, cond, loo_rmse, loo_rmse_per_output, leverage_max).
     loo_rmse is sqrt(mean_j PRESS_j / N), the scalar used to select the degree.
     """
-    from scipy.linalg import cho_factor, cho_solve, solve_triangular
+    from scipy.linalg import cho_solve, solve_triangular
 
     M = np.asarray(M, dtype=np.float64)
     nu = np.asarray(nu, dtype=np.float64)
@@ -279,13 +350,30 @@ def press_loo(
         degree=degree,
         method="auto",
     )
+    def _phi_for_qr():
+        """Materialise Phi only if a QR route is actually taken."""
+        if Phi is not None:
+            return Phi
+        if plan is not None and X_scaled is not None:
+            return plan.evaluate(X_scaled)
+        return None
+
+    # One factor for the leverage AND the coefficients. Previously the
+    # coefficients were refit with QR above qr_at while the leverage stayed on
+    # the Cholesky factor, so the two came from different factorisations: at
+    # cond(M) = 1.5e16 the reported LOO was 12% off the brute-force value, and
+    # once cho_factor failed outright this returned NaN without ever reaching
+    # the QR refit below -- declining a solver the package already ships.
     try:
-        cf, lower = cho_factor(M, lower=False, check_finite=False)
+        cf, lower, _route = normal_equation_factor(
+            M, _phi_for_qr, n_samples=N, cond=rep.cond, qr_at=qr_at,
+            ridge=ridge, weighted=weights is not None,
+        )
     except np.linalg.LinAlgError as exc:
         msg = (
-            f"Cholesky factorisation of the {M.shape[0]}x{M.shape[1]} moment "
-            f"matrix failed: M is not positive definite; the LOO leverage is "
-            f"undefined."
+            f"neither the Cholesky of the {M.shape[0]}x{M.shape[1]} moment "
+            f"matrix nor a QR of the design could factor it; the LOO leverage "
+            f"is undefined."
         )
         if on_singular == "raise":
             raise IllConditionedError(msg) from exc
@@ -294,9 +382,10 @@ def press_loo(
         return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
     coeffs = cho_solve((cf, lower), nu, check_finite=False)
     if ridge == 0.0 and rep.cond >= qr_at:
-        # P5.4: make the QR refit reachable on the default LOO path; the
-        # leverage below still comes from the (successful) Cholesky factor.
-        Phi_qr = Phi if Phi is not None else plan.evaluate(X_scaled)
+        # P5.4: the coefficients get a true QR solve (R^{-1} Q^T Y), which never
+        # forms Phi^T Y and so keeps digits the factor-and-substitute route
+        # above cannot. The leverage now comes from the same QR factor.
+        Phi_qr = _phi_for_qr()
         coeffs_qr, _ = solve_emulator_coefficients(
             M, nu, on_singular=on_singular, warn_at=warn_at, raise_at=raise_at,
             qr_at=qr_at, degree=degree, return_cond=True, Phi=Phi_qr, Y=Y,

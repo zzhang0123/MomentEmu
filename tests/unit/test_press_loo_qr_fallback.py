@@ -148,10 +148,10 @@ def test_qr_route_is_refused_when_M_is_not_the_gram_matrix() -> None:
 
     Phi, M, _nu, _Y, _z, _mi = _design(CHOLESKY_OK[-1])
     common = dict(n_samples=N_SAMPLES, cond=1e18, qr_at=1e13)
-    _u, _l, route = normal_equation_factor(M, lambda: Phi, ridge=0.0, **common)
+    _u, _l, route, _q = normal_equation_factor(M, lambda: Phi, ridge=0.0, **common)
     assert route == "qr"
     for kwargs in ({"ridge": 1e-8}, {"weighted": True}):
-        _u, _l, route = normal_equation_factor(M, lambda: Phi, **kwargs, **common)
+        _u, _l, route, _q = normal_equation_factor(M, lambda: Phi, **kwargs, **common)
         assert route == "cholesky", f"{kwargs} must not take a factor of Phi"
 
 
@@ -162,7 +162,47 @@ def test_qr_route_is_refused_when_the_design_is_underdetermined() -> None:
     rng = np.random.default_rng(7)
     Phi = rng.standard_normal((8, 20))
     M = Phi.T @ Phi / 8 + np.eye(20)  # positive definite so the Cholesky works
-    _u, _l, route = normal_equation_factor(
+    _u, _l, route, _q = normal_equation_factor(
         M, lambda: Phi, n_samples=8, cond=1e18, qr_at=1e13,
     )
     assert route == "cholesky"
+
+
+def _count_qr(monkeypatch) -> list[int]:
+    """Count Householder QR factorisations of the design."""
+    calls = [0]
+    real = np.linalg.qr
+
+    def counting(a, mode="reduced"):
+        calls[0] += 1
+        return real(a, mode=mode)
+
+    monkeypatch.setattr(np.linalg, "qr", counting)
+    return calls
+
+
+@pytest.mark.parametrize("degree", CHOLESKY_FAILS)
+def test_press_loo_factors_the_design_once(degree: int, monkeypatch) -> None:
+    """The factor and the coefficients come from ONE QR of the same Phi.
+
+    They used to come from two: normal_equation_factor ran a Householder QR
+    for the factor, then the coefficient refit ran another one through
+    qr_solve. Phi is (N, D) and the QR is O(N D^2), so on the 21cmGEM
+    benchmark at D = 11,628 that was minutes of duplicated work.
+    """
+    Phi, M, nu, Y, _z, _mi = _design(degree)
+    calls = _count_qr(monkeypatch)
+    coeffs, *_ = press_loo(M, nu, Phi, Y, on_singular="warn")
+    assert np.isfinite(coeffs).all()
+    assert calls[0] == 1, f"factored Phi {calls[0]} times"
+
+
+@pytest.mark.parametrize("degree", CHOLESKY_FAILS)
+def test_shared_qr_gives_the_same_coefficients(degree: int) -> None:
+    """Sharing the factorisation must not change the answer."""
+    from MomentEmu.core import qr_solve
+
+    Phi, M, nu, Y, _z, _mi = _design(degree)
+    shared, *_ = press_loo(M, nu, Phi, Y, on_singular="warn")
+    separate, _rank = qr_solve(Phi, Y)
+    np.testing.assert_allclose(shared, separate, rtol=1e-10, atol=1e-12)

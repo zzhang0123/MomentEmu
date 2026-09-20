@@ -122,7 +122,11 @@ def normal_equation_factor(
     M, phi_factory=None, *, n_samples, cond, qr_at=COND_QR, ridge=0.0,
     weighted=False,
 ):
-    """Return ``(U, lower, route)`` with ``U^T U = M`` by the most accurate route.
+    """Return ``(U, lower, route, Q)`` with ``U^T U = M``, by the best route.
+
+    The fourth item is ``(Q, U_unscaled)`` when a QR route was taken and
+    ``None`` otherwise, so the caller can solve for the coefficients from the
+    same factorisation rather than running a second one.
 
     ``cho_factor(M)`` squares ``cond(Phi)``. Above ``qr_at`` that costs more
     digits than the factorisation has left, so take ``R`` from a QR of ``Phi``
@@ -154,7 +158,7 @@ def normal_equation_factor(
             except np.linalg.LinAlgError as exc:
                 failure = exc
                 continue
-            return cf, lower, "cholesky"
+            return cf, lower, "cholesky", None
         if not qr_allowed:
             continue
         Phi = phi_factory()
@@ -164,17 +168,25 @@ def normal_equation_factor(
         if Phi.shape[0] < Phi.shape[1]:
             continue  # underdetermined: R is not square and does not factor M
         try:
-            U = _upper_factor_from_qr(Phi)
+            U, Q = _upper_factor_from_qr(Phi)
         except np.linalg.LinAlgError as exc:
             failure = exc
             continue
         _report_cond_phi(U)
-        return U / np.sqrt(float(n_samples)), False, "qr"
+        # Carry U unscaled alongside Q: reconstructing it from U / sqrt(N)
+        # perturbs every entry, and cond(Phi) amplifies that into the solve.
+        return U / np.sqrt(float(n_samples)), False, "qr", (Q, U)
     raise failure or np.linalg.LinAlgError("no factorisation of M succeeded")
 
 
 def _upper_factor_from_qr(Phi):
-    """Return upper ``U`` with ``U^T U = Phi^T Phi``, by CholeskyQR2 then QR."""
+    """Return ``(U, Q)`` with ``Phi = Q U``, ``U`` upper, by CholeskyQR2 then QR.
+
+    ``U^T U = Phi^T Phi``, so ``U`` factors the moment matrix, and ``Q`` solves
+    the least-squares problem as ``U^{-1} Q^T Y``. Returning both lets one
+    factorisation serve the leverage and the coefficients; they used to come
+    from two QRs of the same ``Phi``, which is O(N D^2) each.
+    """
     from scipy.linalg import solve_triangular
 
     try:
@@ -183,11 +195,13 @@ def _upper_factor_from_qr(Phi):
         R1 = np.linalg.cholesky(Phi.T @ Phi)
         Q1 = solve_triangular(R1, Phi.T, lower=True, check_finite=False).T
         R2 = np.linalg.cholesky(Q1.T @ Q1)
-        return (R1 @ R2).T
+        Q2 = solve_triangular(R2, Q1.T, lower=True, check_finite=False).T
+        return (R1 @ R2).T, Q2
     except np.linalg.LinAlgError:
         # The Gram matrix is not positive definite in float64; only a
         # factorisation that never forms it is left.
-        return np.linalg.qr(Phi, mode="r")
+        Q, R = np.linalg.qr(Phi)
+        return R, Q
 
 
 def qr_solve(Phi, Y, *, rcond=1e-12):
@@ -196,11 +210,23 @@ def qr_solve(Phi, Y, *, rcond=1e-12):
     Falls back to ``lstsq(rcond)`` and warns with the rank when QR reports a
     numerical rank below D.
     """
-    from scipy.linalg import lstsq, solve_triangular
-
     Phi = np.asarray(Phi, dtype=np.float64)
     Y = np.asarray(Y, dtype=np.float64)
     Q, R = np.linalg.qr(Phi)
+    return solve_from_qr(Phi, Q, R, Y, rcond=rcond)
+
+
+def solve_from_qr(Phi, Q, R, Y, *, rcond=1e-12):
+    """Least squares from a QR already computed; returns ``(coeffs, rank)``.
+
+    ``R`` need not be the Householder factor: any upper ``U`` with
+    ``Phi = Q U`` works, which is what CholeskyQR2 produces.
+
+    Falls back to ``lstsq(rcond)`` and warns with the rank when the factor
+    reports a numerical rank below D.
+    """
+    from scipy.linalg import lstsq, solve_triangular
+
     diag = np.abs(np.diag(R))
     rank = int((diag > rcond * diag.max()).sum()) if diag.size else 0
     if rank == R.shape[0]:
@@ -416,7 +442,7 @@ def press_loo(
     # once cho_factor failed outright this returned NaN without ever reaching
     # the QR refit below -- declining a solver the package already ships.
     try:
-        cf, lower, _route = normal_equation_factor(
+        cf, lower, _route, _Q = normal_equation_factor(
             M, _phi_for_qr, n_samples=N, cond=rep.cond, qr_at=qr_at,
             ridge=ridge, weighted=weights is not None,
         )
@@ -431,18 +457,19 @@ def press_loo(
         warnings.warn(msg, IllConditionedWarning, stacklevel=2)
         nan = float("nan")
         return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
-    coeffs = cho_solve((cf, lower), nu, check_finite=False)
-    if ridge == 0.0 and rep.cond >= qr_at:
-        # P5.4: the coefficients get a true QR solve (R^{-1} Q^T Y), which never
-        # forms Phi^T Y and so keeps digits the factor-and-substitute route
-        # above cannot. The leverage now comes from the same QR factor.
-        Phi_qr = _phi_for_qr()
-        coeffs_qr, _ = solve_emulator_coefficients(
-            M, nu, on_singular=on_singular, warn_at=warn_at, raise_at=raise_at,
-            qr_at=qr_at, degree=degree, return_cond=True, Phi=Phi_qr, Y=Y,
+    if _Q is not None:
+        # P5.4: a true QR solve, U^{-1} Q^T Y, which never forms Phi^T Y and so
+        # keeps digits that factor-and-substitute on the moment matrix cannot.
+        # Q and U come from the factorisation that produced cf, so this costs
+        # no second pass over Phi.
+        Q_shared, U_shared = _Q
+        coeffs_qr, _rank = solve_from_qr(_phi_for_qr(), Q_shared, U_shared, Y)
+        coeffs = (
+            coeffs_qr if np.isfinite(coeffs_qr).all()
+            else cho_solve((cf, lower), nu, check_finite=False)
         )
-        if np.isfinite(coeffs_qr).all():
-            coeffs = coeffs_qr
+    else:
+        coeffs = cho_solve((cf, lower), nu, check_finite=False)
     check_coefficients_finite(coeffs, degree=degree)
     if weights is None:
         w_col = None

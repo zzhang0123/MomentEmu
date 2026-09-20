@@ -163,3 +163,36 @@ def test_scan_rank_rejects_mismatched_degree_list(data):
     Xtr, Ytr, _, _ = data
     with pytest.raises(ValueError, match="one value per rank"):
         scan_rank(Xtr, Ytr, ranks=[1, 2], degree=[4, 5, 6])
+
+
+@pytest.mark.parametrize("scaling", ["global", "per_output"])
+def test_output_scaling_is_accepted_and_validated(data, scaling):
+    Xtr, Ytr, _, _ = data
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        evals, V = active_subspace(Xtr, Ytr, output_scaling=scaling)
+    assert evals.shape == (P,) and V.shape == (P, P)
+    with pytest.raises(ValueError, match="output_scaling"):
+        active_subspace(Xtr, Ytr, output_scaling="sideways")
+
+
+def test_per_output_scaling_picks_the_wrong_leading_direction():
+    """The default is "global" for a reason. Scaling each output column by its
+    own standard deviation makes a near-silent channel as important as the
+    loudest, which is wrong when the outputs are one quantity sampled at many
+    points. Here three loud channels carry W1 and thirty-seven channels a
+    ten-thousand-times weaker W2: per-output scaling does not merely dilute
+    the answer, it returns W2 as the leading direction."""
+    rng = np.random.default_rng(5)
+    X = rng.uniform(-1, 1, (4000, P))
+    loud = np.tanh(2.0 * (X @ W1))
+    quiet = 1e-4 * (X @ W2)
+    Y = np.column_stack([loud, loud * 0.9, loud * 1.1]
+                        + [quiet * rng.standard_normal() for _ in range(37)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _, V_g = active_subspace(X, Y, output_scaling="global")
+        _, V_p = active_subspace(X, Y, output_scaling="per_output")
+    assert abs(float(V_g[:, 0] @ W1)) > 0.99, "global lost the loud direction"
+    assert abs(float(V_p[:, 0] @ W2)) > 0.99, "per_output did not flip as expected"
+    assert abs(float(V_p[:, 0] @ W1)) < 0.05

@@ -36,6 +36,7 @@ def active_subspace(
     Y: Any,
     pilot_degree: int = 3,
     batch_size: int = 2048,
+    output_scaling: str = "global",
     **pilot_kwargs: Any,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Eigendecomposition of the gradient covariance, largest first.
@@ -45,12 +46,26 @@ def active_subspace(
     and Y are standardised first, so C measures relative sensitivity and the
     result is invariant to the units of either.
 
-    A higher-degree pilot is not a better one. Its extra freedom wiggles in
-    directions the target does not use, and that wiggle appears in the
-    gradient covariance as signal: on a 7-parameter ridge target whose true
-    active subspace is 2-dimensional, the share leaking into the five dead
-    directions grew from 0.0023 at degree 3 to 0.0077 at degree 7, blurring
-    the very gap that rank selection reads. Keep the pilot cheap.
+    ``output_scaling`` decides how the outputs are put on a common footing,
+    and the default is not the obvious one. "per_output" divides each output
+    column by its own standard deviation, which is right when the outputs are
+    different physical quantities. It is wrong for the case this package is
+    built for -- one quantity sampled at many points, a spectrum -- because it
+    makes a near-silent channel as important as the loudest. On the 21cmGEM
+    benchmark the per-bin standard deviations run from exactly zero to 88.8,
+    and per-bin scaling moved the leading cumulative share from 0.53 to 0.74,
+    blurring the rank gap it is read from. "global" centres each output and
+    divides everything by one scalar, preserving relative importance.
+
+    The pilot degree matters far less than the scaling, and only once the
+    scaling is wrong does it look important. Under "per_output" on the 21cmGEM
+    benchmark a degree-3 pilot scored 2.78 percent against degree 5's 2.41;
+    under "global" the same pair is 2.25 against 2.23, which is noise. A
+    higher-degree pilot is not free either: on a synthetic ridge whose true
+    subspace is 2-dimensional, leakage into the five dead directions grew from
+    0.0023 at degree 3 to 0.0077 at degree 7, blurring the gap rank selection
+    reads. The default stays cheap; raise it only if the rotation looks
+    unstable after the scaling is right.
 
     Returns:
         (eigenvalues, V): eigenvalues descending, V columns the matching
@@ -62,8 +77,18 @@ def active_subspace(
     check_finite(Y, "Y")
     if Y.ndim == 1:
         Y = Y.reshape(-1, 1)
+    if output_scaling not in ("global", "per_output"):
+        raise ValueError(
+            f"output_scaling must be 'global' or 'per_output', got "
+            f"{output_scaling!r}"
+        )
     Xs, _, _ = _standardise(X)
-    Ys, _, _ = _standardise(Y)
+    if output_scaling == "per_output":
+        Ys, _, _ = _standardise(Y)
+    else:
+        Ys = Y - Y.mean(axis=0)
+        span = float(np.sqrt(np.mean(Ys ** 2)))
+        Ys = Ys / (span if span > 0.0 else 1.0)
 
     pilot_kwargs.setdefault("forward", True)
     pilot_kwargs.setdefault("backward", False)
@@ -154,6 +179,7 @@ class ActiveSubspaceEmu:
         rank: Any = "auto",
         variance_target: float = 0.999,
         pilot_degree: int = 3,
+        output_scaling: str = "global",
         pilot_kwargs: dict | None = None,
         **kwargs: Any,
     ) -> None:
@@ -163,7 +189,8 @@ class ActiveSubspaceEmu:
             Y = Y.reshape(-1, 1)
         n = X.shape[1]
         self.eigenvalues, V_full = active_subspace(
-            X, Y, pilot_degree=pilot_degree, **(pilot_kwargs or {})
+            X, Y, pilot_degree=pilot_degree, output_scaling=output_scaling,
+            **(pilot_kwargs or {})
         )
         total = float(self.eigenvalues.sum())
         shares = (

@@ -92,6 +92,28 @@ All notable changes to MomentEmu are documented here. The format follows
   over 1,716 for 1.9 times the error.
 - `rotation.select_rank` and `ActiveSubspaceEmu.transform`, so the two
   preconditioners share their rank rule and compose in either order.
+
+### Fixed
+
+- `active_subspace` scaled each output column by its own standard deviation
+  before accumulating the gradient covariance, which is wrong for the case
+  this package targets: one quantity sampled at many points. It makes a
+  near-silent channel as important as the loudest. `output_scaling` now
+  defaults to "global", centring each output and dividing everything by one
+  scalar; "per_output" keeps the old behaviour for genuinely different
+  physical quantities.
+
+  The effect is not a dilution but a wrong answer. On a synthetic case with
+  three loud channels carrying one direction and thirty-seven channels
+  carrying another ten thousand times weaker, per-output scaling returned the
+  weak direction as the leading one. On the 21cmGEM benchmark, whose per-bin
+  standard deviations run from exactly zero to 88.8, the fix moved a rank-5
+  degree-10 fit from 2.27 to 1.50 percent and brought the whole rank-5 column
+  into agreement with an independent implementation (2.2495 against 2.2386 at
+  degree 8, 1.5044 against 1.4959 at degree 10). The pilot degree, which had
+  looked important under the old scaling (2.78 at degree 3 against 2.41 at
+  degree 5), turns out not to matter once the scaling is right (2.25 against
+  2.23), so its default is unchanged.
 - `MomentEmu.warp` (T-002 / P4): `WarpedEmu` and `fit_warps` choose a monotone
   map per input axis and fit the polynomial in those coordinates. The other
   reductions cut the term count at a fixed convergence rate; this moves the

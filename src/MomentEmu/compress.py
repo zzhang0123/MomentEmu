@@ -110,6 +110,14 @@ def output_modes(Y: Any, rank: Any = "auto", *, target: float | None = None,
     return OutputBasis(mean, np.ascontiguousarray(Vt[:k]), float(errors[k]), s)
 
 
+class ExportPayload(NamedTuple):
+    """What a backend needs for the ``(k, m)`` stage after its GEMM."""
+
+    coeffs: np.ndarray          # (D, k), the model's folded coefficients projected
+    modes: np.ndarray           # (k, m)
+    offset: np.ndarray          # (m,)
+
+
 class CompressedEmu:
     """A fitted forward model with its outputs carried in ``k`` modes.
 
@@ -143,6 +151,81 @@ class CompressedEmu:
         """Predict in the original output space, through the modes."""
         full = _predict(self.model, X, **kwargs)
         return self.basis.expand(self.basis.project(full))
+
+    @property
+    def n_params(self) -> int:
+        """Input dimensions, the name the backends read."""
+        return int(getattr(self.model, "n_params", 0)) or _term_width(self.model)
+
+    def export_payload(self) -> ExportPayload:
+        """``(coeffs, modes, offset)`` for a backend, derived in ONE place.
+
+        With ``Cf`` the wrapped model's folded coefficients, prediction is
+        ``Phi Cf``; compression then gives ``((Phi Cf - mean) V^T) V + mean``.
+        Fold the constant into the projected coefficients and it is
+        ``(Phi C_k) V + mean`` with ``C_k = Cf V^T``, so the backend stores
+        ``D x k`` and ``k x m`` instead of ``D x m``.
+
+        Compression is applied AFTER the model's output transform, so it folds
+        into the coefficients only when that transform is linear. A log or
+        asinh output is refused here rather than exported as a different
+        model; the numpy layer still compresses it, after the transform.
+
+        Three backends deriving this separately is the T-007 failure, so they
+        all read it from here.
+        """
+        transforms = _output_transforms(self.model)
+        bad = sorted({t for t in transforms if t != "linear"})
+        if bad:
+            raise NotImplementedError(
+                f"the output transform {bad} is not linear, so compression "
+                f"cannot fold into the coefficients: it is applied after the "
+                f"transform, and the backends apply the transform after the "
+                f"GEMM. The numpy layer still compresses this model."
+            )
+        Cf = np.asarray(_folded_coefficients(self.model), dtype=np.float64)
+        V = self.basis.modes
+        mi = np.asarray(getattr(self.model, "forward_multi_indices",
+                                getattr(self.model, "multi_indices", None)))
+        C_k = Cf @ V.T
+        shift = self.basis.mean @ V.T                     # (k,)
+        const = np.flatnonzero(~mi.any(axis=1))
+        if not const.size:
+            raise NotImplementedError(
+                "the basis has no constant term, so the compression offset "
+                "cannot be folded into the coefficients"
+            )
+        C_k = C_k.copy()
+        C_k[const[0]] -= shift
+        return ExportPayload(C_k, np.ascontiguousarray(V),
+                             np.asarray(self.basis.mean, dtype=np.float64))
+
+    def generate_forward_symb_emu(self, variable_names: Any = None) -> list:
+        """Expressions in the original output space, through the modes."""
+        pay = self.export_payload()
+        inner = self.model
+        from MomentEmu.emulator import symbolic_polynomial_expressions
+
+        mi = np.asarray(getattr(inner, "forward_multi_indices",
+                                getattr(inner, "multi_indices", None)))
+        modes = symbolic_polynomial_expressions(
+            pay.coeffs, mi,
+            variable_names=variable_names,
+            input_means=inner.scaler_X.mean_,
+            input_vars=inner.scaler_X.var_,
+            family=getattr(inner, "basis_kind", "monomial"),
+        )
+        import sympy as sp
+
+        out = []
+        for j in range(pay.modes.shape[1]):
+            expr = sp.Float(float(pay.offset[j]), 17)
+            for i, mode in enumerate(modes):
+                w = float(pay.modes[i, j])
+                if w != 0.0:
+                    expr = expr + sp.Float(w, 17) * mode
+            out.append(expr)
+        return out
 
     def report(self) -> dict:
         """The rank, both errors it was chosen from, and what it saves."""
@@ -181,6 +264,42 @@ def _predict(model: Any, X: Any, **kwargs: Any) -> np.ndarray:
             return np.atleast_2d(model.forward_emulator(X, **kwargs))
         except TypeError:
             return np.atleast_2d(model.forward_emulator(X))
+
+
+def _term_width(model: Any) -> int:
+    """Input dimensions read off whatever index set the model carries."""
+    for name in ("forward_multi_indices", "multi_indices"):
+        mi = getattr(model, name, None)
+        if mi is not None:
+            return int(np.asarray(mi).shape[1])
+    return 0
+
+
+def _output_transforms(model: Any) -> tuple:
+    """Per-output transform names, defaulting to linear."""
+    fn = getattr(model, "_transforms", None)
+    if callable(fn):
+        return tuple(fn())
+    t = getattr(model, "transform", None)
+    if t is not None:
+        return tuple(t)
+    return ()
+
+
+def _folded_coefficients(model: Any) -> np.ndarray:
+    """Coefficients with the model's own output affine already folded in."""
+    folded = getattr(model, "forward_coeffs_folded", None)
+    if folded is not None:
+        return np.asarray(folded, dtype=np.float64)
+    from MomentEmu.monomials import fold_output_affine
+
+    mi = np.asarray(getattr(model, "forward_multi_indices",
+                            getattr(model, "multi_indices", None)))
+    return fold_output_affine(
+        np.asarray(model.coefficients, dtype=np.float64), mi,
+        np.asarray(model.mean_Y_, dtype=np.float64),
+        np.asarray(model.scale_Y_, dtype=np.float64),
+    )
 
 
 def _term_count(model: Any) -> int:

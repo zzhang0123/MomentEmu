@@ -11,6 +11,7 @@ equinox dependency and no eqx.filter_jit.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,6 +125,10 @@ class JaxEmulator:
     output_codes: tuple
     direction: str
     dtype: object
+    # Any rather than object: these are indexed and matmul'd, which the
+    # house "object" annotation on the other arrays does not allow.
+    output_modes: Any = None      # (k, m) or None when uncompressed
+    output_offset: Any = None     # (m,) or None
 
     def evaluate(self, X):
         """Un-jitted evaluation: safe inside a user jax.jit log-density."""
@@ -177,6 +182,10 @@ class JaxEmulator:
             Phi = _tensor_design(Xs, self.multi_indices, self.basis_family,
                                  self.table_degree, self.n_params)
         Y = Phi @ self.coeffs
+        if self.output_modes is not None:
+            # T-011: the fit carries k output modes; expand to the m the
+            # caller asked for. Derived in CompressedEmu.export_payload.
+            Y = Y @ self.output_modes + self.output_offset
         if any(self.output_codes):
             Y = self._apply_inverse(Y, self.output_codes)
         return Y[0] if single else Y
@@ -228,6 +237,26 @@ class JaxEmulator:
         return _JITTED_HESSIAN(self, X)
 
     @classmethod
+    @classmethod
+    def from_compressed(cls, emulator, *, dtype=None):
+        """Export a :class:`MomentEmu.compress.CompressedEmu`.
+
+        The inner model supplies everything but the last stage; the payload
+        supplies the (D, k) coefficients and the (k, m) map, so the exported
+        arrays are the compressed ones rather than the expansion of them.
+        """
+        dtype = _resolve_dtype(dtype)
+        pay = emulator.export_payload()
+        inner = cls.from_polyemu(emulator.model, dtype=dtype)
+        return dataclasses.replace(
+            inner,
+            coeffs=jnp.asarray(pay.coeffs, dtype=dtype),
+            n_outputs=int(pay.modes.shape[1]),
+            output_codes=tuple(0 for _ in range(int(pay.modes.shape[1]))),
+            output_modes=jnp.asarray(pay.modes, dtype=dtype),
+            output_offset=jnp.asarray(pay.offset, dtype=dtype),
+        )
+
     @classmethod
     def from_sparse(cls, emulator, *, dtype=None):
         """Export a :class:`MomentEmu.sparse.SparseEmu` fitted in a tensor basis.
@@ -283,6 +312,13 @@ class JaxEmulator:
 
     @classmethod
     def from_polyemu(cls, emulator, *, direction="forward", dtype=None):
+        if hasattr(emulator, "export_payload"):
+            if direction != "forward":
+                raise ValueError(
+                    "a compressed model has no backward map; pass "
+                    "direction='forward'"
+                )
+            return cls.from_compressed(emulator, dtype=dtype)
         if hasattr(emulator, "candidate_indices") and not hasattr(
             emulator, "forward_multi_indices"
         ):
@@ -383,6 +419,10 @@ jax.tree_util.register_dataclass(
         "level_rows",
         "select",
         "multi_indices",
+        # T-011: arrays, so they are data fields and ride through a jit/vmap
+        # trace. None when the model is uncompressed, which a pytree tolerates.
+        "output_modes",
+        "output_offset",
     ],
     meta_fields=[
         "n_params",

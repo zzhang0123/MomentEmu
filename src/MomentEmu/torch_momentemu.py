@@ -21,6 +21,10 @@ class TorchMomentEmu(nn.Module):
 
     def __init__(self, trained_emulator, dtype=torch.float64):
         super().__init__()
+        if hasattr(trained_emulator, "export_payload"):
+            self.dtype = dtype
+            self._init_from_compressed(trained_emulator, dtype)
+            return
         sparse = hasattr(trained_emulator, "candidate_indices") and not hasattr(
             trained_emulator, "forward_multi_indices"
         )
@@ -74,6 +78,31 @@ class TorchMomentEmu(nn.Module):
                 dtype=dtype,
             ),
         )
+
+    def _init_from_compressed(self, emulator, dtype) -> None:
+        """Take a :class:`MomentEmu.compress.CompressedEmu`.
+
+        The inner model supplies every stage but the last; the payload
+        supplies the (D, k) coefficients and the (k, m) map, derived in
+        CompressedEmu.export_payload so all three backends read one algebra.
+        """
+        pay = emulator.export_payload()
+        TorchMomentEmu.__init__(self, emulator.model, dtype=dtype)
+        self.n_outputs = int(pay.modes.shape[1])
+        self.transform_codes = _transform_codes(
+            tuple("linear" for _ in range(self.n_outputs))
+        )
+        # The payload already folds the inner model's output affine in.
+        for name, value in (
+            ("coeffs", pay.coeffs),
+            ("output_mean", np.zeros(int(pay.coeffs.shape[1]))),
+            ("output_scale", np.ones(int(pay.coeffs.shape[1]))),
+            ("output_modes", pay.modes),
+            ("output_offset", pay.offset),
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+            self.register_buffer(name, torch.tensor(np.asarray(value), dtype=dtype))
 
     def _init_from_sparse(self, emulator, dtype) -> None:
         """Take a :class:`MomentEmu.sparse.SparseEmu`, which is a forward fit.
@@ -216,6 +245,10 @@ class TorchMomentEmu(nn.Module):
         X_scaled = (X - self.input_mean) / self.input_scale
         Phi = self.evaluate_basis(X_scaled)
         Y = Phi @ self.coeffs * self.output_scale + self.output_mean
+        modes = getattr(self, "output_modes", None)
+        if modes is not None:
+            # T-011: the fit carries k output modes; expand to m.
+            Y = Y @ modes + self.output_offset
         if any(self.transform_codes):
             Y = self._apply_inverse(Y)
         return Y

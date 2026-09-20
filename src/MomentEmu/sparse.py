@@ -340,6 +340,68 @@ class SparseEmu:
         self.cond = float(info["cond"])
 
     @property
+    def n_params(self) -> int:
+        """Input dimensions, the name the backends read."""
+        return int(self.multi_indices.shape[1])
+
+    @property
+    def n_outputs(self) -> int:
+        """Output dimensions, the name the backends read."""
+        return int(np.asarray(self.coefficients).shape[1])
+
+    def generate_forward_symb_emu(self, variable_names: Any = None) -> list:
+        """Sympy expressions for the fitted model, one per output.
+
+        Refuses a non-monomial basis for the reason PolyEmu does: the stored
+        coefficients belong to the family they were fitted in, and reading
+        Legendre or Chebyshev coefficients as monomial ones is silently wrong.
+
+        The expression carries only the SELECTED terms, which is the point of
+        exporting a sparse fit: the closure they were chosen from is not in it.
+        """
+        import sympy as sp
+
+        if self.basis_kind != "monomial":
+            raise NotImplementedError(
+                f"symbolic export assumes a monomial basis and this fit used "
+                f"basis_kind={self.basis_kind!r}. Its coefficients belong to "
+                f"that family, so writing them as monomial coefficients would "
+                f"be silently wrong. Refit with basis_kind='monomial' to "
+                f"export symbolically."
+            )
+        mi = np.asarray(self.multi_indices)
+        n = int(mi.shape[1])
+        names = (
+            [f"x{i}" for i in range(n)] if variable_names is None
+            else [str(v) for v in variable_names]
+        )
+        if len(names) != n:
+            raise ValueError(f"expected {n} variable names, got {len(names)}")
+        xs = sp.symbols(names)
+        if n == 1:
+            xs = (xs,)
+        # The same box map the numpy model applies: 2 (x - lo) / span - 1.
+        z = [
+            2 * (xs[i] - sp.Float(float(self.lo_[i]))) / sp.Float(float(self.span_[i]))
+            - 1
+            for i in range(n)
+        ]
+        coeffs = np.asarray(self.coefficients, dtype=np.float64)
+        exprs = []
+        for j in range(coeffs.shape[1]):
+            total = sp.Integer(0)
+            for r, alpha in enumerate(mi):
+                term = sp.Float(float(coeffs[r, j]))
+                for i in np.flatnonzero(alpha):
+                    term = term * z[i] ** int(alpha[i])
+                total = total + term
+            exprs.append(
+                total * sp.Float(float(self.scale_Y_[j]))
+                + sp.Float(float(self.mean_Y_[j]))
+            )
+        return exprs
+
+    @property
     def _plan_cls(self):
         """Basis plan class; a pickle from before basis_kind was added has none.
 

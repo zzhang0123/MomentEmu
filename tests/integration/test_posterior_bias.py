@@ -2,15 +2,11 @@
 from __future__ import annotations
 
 import pickle
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from MomentEmu.emulator import PolyEmu
-
-ARCHIVE = Path("/Users/zzhang/Workspace/MomentEmu-review-2026-09/r2")
 
 
 def test_linear_gaussian_gls_shift_to_1e_10():
@@ -41,36 +37,27 @@ def test_linear_gaussian_gls_shift_to_1e_10():
     )
 
 
-@pytest.mark.skipif(
-    not (ARCHIVE / "bayes_cache_emus.pkl").exists(), reason="review archive not present"
-)
 @pytest.mark.parametrize(
     "key,lo,hi", [("d5_log1", 0.20, 0.30), ("d6_log0", 0.0, 0.05), ("d3_log1", 5.0, np.inf)],
 )
-def test_cached_problem1_mahalanobis(key, lo, hi):
-    if str(ARCHIVE) not in sys.path:
-        sys.path.insert(0, str(ARCHIVE))
-    import bayes_common as bc
-
-    with open(ARCHIVE / "bayes_cache_emus.pkl", "rb") as f:
+def test_cached_problem1_mahalanobis(key, lo, hi, review_archive, archive_bayes_common):
+    bc = archive_bayes_common
+    with open(review_archive / "bayes_cache_emus.pkl", "rb") as f:
         cache = pickle.load(f)
-    with open(ARCHIVE / "bayes_cache_stage2.pkl", "rb") as f:
+    with open(review_archive / "bayes_cache_stage2.pkl", "rb") as f:
         stage2 = pickle.load(f)
     truth = stage2["truth"]
     mt = np.asarray(truth["mean"])
-    sig = np.load(ARCHIVE / "bayes_cache_problem.npz")["sigma"]
+    sig = np.load(review_archive / "bayes_cache_problem.npz")["sigma"]
     Y_true = np.asarray(bc.f_sim_np(mt)).ravel()
     emu = cache["emus"][key]
     res = emu.posterior_bias(mt, Y_true, sigma=sig)
     assert lo <= res["mahalanobis"] <= hi, (key, res["mahalanobis"])
 
-@pytest.mark.skipif(
-    not (ARCHIVE / "bayes_cache_emus.pkl").exists(), reason="review archive not present"
-)
-def test_cached_stage9_fraction_above_0_1_sigma():
-    with open(ARCHIVE / "bayes_cache_emus.pkl", "rb") as f:
+def test_cached_stage9_fraction_above_0_1_sigma(review_archive):
+    with open(review_archive / "bayes_cache_emus.pkl", "rb") as f:
         cache = pickle.load(f)
-    sig = np.load(ARCHIVE / "bayes_cache_problem.npz")["sigma"]
+    sig = np.load(review_archive / "bayes_cache_problem.npz")["sigma"]
     emu = cache["emus"]["d6_log0"]
     res = emu.posterior_bias_map(cache["Xv"], cache["Yv"], sigma=sig)
     # Stage-9 (r2/bayes_stage9.log): 0.215 +/- 0.01.

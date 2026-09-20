@@ -40,11 +40,7 @@ def test_lowrank_cov_k_zero_is_diagonal():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(
-    not Path("/Users/zzhang/Workspace/MomentEmu-review-2026-09/r2/bayes_cache_emus.pkl").exists(),
-    reason="review archive not present",
-)
-def test_experiment_runs_and_reduces_shifts():
+def test_experiment_runs_and_reduces_shifts(archive_bayes_common):
     mod = _load()
     rows = mod.run(keys=("d5_log0",), k=36)
     diag = next(r for r in rows if r["model"] == "diag")

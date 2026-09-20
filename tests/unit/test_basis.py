@@ -540,3 +540,49 @@ def test_impossible_parity_budget_is_empty():
     assert Basis(degree=4, parity=("odd",) * 5).build(_names(5)).shape == (0, 5)
     mi = Basis(degree=5, parity=("odd",) * 5).build(_names(5))
     assert mi.shape == (1, 5) and np.array_equal(mi[0], np.ones(5, dtype=np.int64))
+
+
+def test_basis_with_backward_is_rejected_by_the_constructor():
+    rng = np.random.default_rng(11)
+    X = rng.uniform(-1.0, 1.0, (400, 4))
+    Y = np.column_stack([X[:, 0], X[:, 1], X[:, 2], X[:, 3]])
+    with pytest.raises(ValueError, match="basis="):
+        PolyEmu(X, Y, basis=Basis(max_interaction=1), backward=True, verbose=0)
+
+
+def test_backward_sweep_ignores_a_forward_basis():
+    """The backward index set is built over n_outputs, never from self.basis.
+
+    basis= is specified over the n_params inputs, so applying it to the
+    backward map would give an index set of the wrong arity. The constructor
+    rejects basis= with backward=True, but generate_backward_emulator is
+    public and can still be reached with self.basis set. n_params ==
+    n_outputs here, so a wrong-arity index set would not trip any shape
+    check; only the term count tells the two apart.
+    """
+    rng = np.random.default_rng(12)
+    n = 4
+    X = rng.uniform(-1.0, 1.0, (400, n))
+    Y = np.column_stack([
+        X[:, 0] + 0.3 * X[:, 1] ** 2,
+        X[:, 1] - 0.2 * X[:, 2],
+        X[:, 2] + 0.1 * X[:, 3],
+        X[:, 3] - 0.4 * X[:, 0],
+    ])
+    basis = Basis(max_interaction=1)
+    emu = PolyEmu(
+        X, Y, basis=basis, forward=True, backward=False,
+        parameter_names=_names(n), max_degree_forward=2, verbose=0,
+    )
+    assert emu.basis is not None
+    assert emu.forward_multi_indices.shape[0] == basis.build(_names(n), 2).shape[0]
+
+    emu.generate_backward_emulator(
+        emu.scaler_X.transform(X), emu.scaler_Y.transform(Y),
+        emu.scaler_X.transform(X), emu.scaler_Y.transform(Y),
+        init_deg=2, max_degree=2,
+    )
+    expected = generate_multi_indices(emu.n_outputs, emu.backward_degree)
+    assert np.array_equal(emu.backward_multi_indices, expected)
+    # The forward basis is strictly smaller, so an accidental reuse is visible.
+    assert basis.build(_names(n), 2).shape[0] < expected.shape[0]

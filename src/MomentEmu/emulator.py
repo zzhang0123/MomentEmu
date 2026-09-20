@@ -1052,11 +1052,7 @@ class PolyEmu:
                     stacklevel=2,
                 )
             elif max_degree_backward > max_deg_backward:
-                D = (
-                    basis_size(self.n_outputs, max_degree_backward)
-                    if self.basis is None
-                    else int(self.basis.build(self.parameter_names, max_degree_backward).shape[0])
-                )
+                D = basis_size(self.n_outputs, max_degree_backward)
                 if D >= X_train.shape[0]:
                     raise ValueError(
                         f"max_degree_backward = {max_degree_backward} needs a basis of D = {D} "
@@ -2468,9 +2464,11 @@ class PolyEmu:
 
         for d in range(init_deg, max_degree + 1):
             start_time = time.time()
-            if self.basis is not None:
-                raw_indices = self.basis.build(self.parameter_names, d)
-            elif d == init_deg:
+            # No basis= branch here, unlike the forward sweep: a Basis is
+            # specified over the n_params inputs, while the backward map is
+            # over the n_outputs outputs, so its index set has the wrong
+            # arity. The constructor rejects basis= with backward=True.
+            if d == init_deg:
                 raw_indices = generate_multi_indices(self.n_outputs, d)
             else:
                 aux_indices = given_order_indices(self.n_outputs, d)

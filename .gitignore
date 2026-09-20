@@ -46,3 +46,10 @@ coverage.xml
 # Local Phase 5 report and independent verification prompt (not for the published repo)
 PHASE5_REPORT.md
 PHASE5_VERIFICATION_PROMPT.md
+
+# Local agent handoffs and installation backups
+/.agent-state/
+/.agents/
+/.claude/
+AGENTS.md
+CLAUDE.md

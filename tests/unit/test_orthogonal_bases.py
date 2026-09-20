@@ -123,15 +123,24 @@ def test_validation(data, kwargs, match):
             PolyEmu(X, Y, max_degree_forward=3, verbose=0, **kwargs)
 
 
-def test_symbolic_export_refuses_a_non_monomial_basis(data):
-    """Its coefficients multiply Chebyshev polynomials, so reading them as
-    monomial coefficients would be silently wrong."""
+def test_symbolic_export_writes_chebyshev_not_monomials(data):
+    """The coefficients multiply Chebyshev polynomials, so the export writes
+    those. Reading them as monomial coefficients would be silently wrong, and
+    this refused the export while that was the only alternative."""
+    import sympy as sp
+
     X, Y = data
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         e = PolyEmu(X, Y, basis_kind="chebyshev", max_degree_forward=4, verbose=0)
-    with pytest.raises(NotImplementedError, match="monomial basis"):
-        e.generate_forward_symb_emu()
+        exprs = e.generate_forward_symb_emu(["u", "v", "w"])
+    syms = sp.symbols(["u", "v", "w"])
+    got = np.column_stack([
+        np.asarray(sp.lambdify(syms, x, "numpy")(*X.T), dtype=float)
+        * np.ones(X.shape[0])
+        for x in exprs
+    ])
+    np.testing.assert_allclose(got, e.forward_emulator(X), rtol=1e-9, atol=1e-10)
 
 
 def test_jacobian_stays_analytic_under_the_new_basis(data):

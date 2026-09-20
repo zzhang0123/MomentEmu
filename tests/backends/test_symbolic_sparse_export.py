@@ -5,9 +5,9 @@ a PolyEmu method, so a SparseEmu failed with
 ``AttributeError: 'SparseEmu' object has no attribute 'n_params'`` -- the raw
 shape of the same gap T-007 and the JAX and Torch halves of T-010 closed.
 
-PolyEmu's symbolic export refuses a non-monomial basis, because reading
-Legendre coefficients as monomial ones is silently wrong. SparseEmu is held to
-the same line: monomial exports, the other two raise with the same reason.
+Both now go through the same builder, which writes the family's own
+polynomials rather than reinterpreting the coefficients, so every basis
+exports. Default variable names follow PolyEmu's, which are 1-based.
 """
 
 from __future__ import annotations
@@ -44,7 +44,8 @@ def test_the_expressions_reproduce_the_numpy_model():
     emu, X, _Y = _fit()
     exprs = emu.generate_forward_symb_emu()
     assert len(exprs) == 2
-    names = sp.symbols([f"x{i}" for i in range(3)])
+    # The builder names variables x1..xn, as PolyEmu's export does.
+    names = sp.symbols([f"x{i + 1}" for i in range(3)])
     funcs = [sp.lambdify(names, e, "numpy") for e in exprs]
     got = np.column_stack([f(*X.T) for f in funcs])
     np.testing.assert_allclose(got, emu.forward_emulator(X), rtol=1e-9, atol=1e-10)
@@ -73,10 +74,17 @@ def test_the_expression_is_sparse_not_the_closure():
 
 
 @pytest.mark.parametrize("basis_kind", ("legendre", "chebyshev"))
-def test_a_non_monomial_basis_is_refused_as_it_is_for_polyemu(basis_kind: str):
-    emu, _X, _Y = _fit(basis_kind)
-    with pytest.raises(NotImplementedError, match="monomial"):
-        emu.generate_forward_symb_emu()
+def test_a_tensor_basis_exports_in_its_own_family(basis_kind: str):
+    """This used to raise. The refusal was right for a reinterpretation of the
+    coefficients and wrong as a limit: the fix was to print the family."""
+    emu, X, _Y = _fit(basis_kind)
+    exprs = emu.generate_forward_symb_emu()
+    names = sp.symbols([f"x{i + 1}" for i in range(3)])
+    got = np.column_stack([
+        np.asarray(sp.lambdify(names, e, "numpy")(*X.T), dtype=float)
+        for e in exprs
+    ])
+    np.testing.assert_allclose(got, emu.forward_emulator(X), rtol=1e-9, atol=1e-10)
 
 
 def test_n_params_and_n_outputs_are_available():

@@ -352,54 +352,26 @@ class SparseEmu:
     def generate_forward_symb_emu(self, variable_names: Any = None) -> list:
         """Sympy expressions for the fitted model, one per output.
 
-        Refuses a non-monomial basis for the reason PolyEmu does: the stored
-        coefficients belong to the family they were fitted in, and reading
-        Legendre or Chebyshev coefficients as monomial ones is silently wrong.
-
-        The expression carries only the SELECTED terms, which is the point of
-        exporting a sparse fit: the closure they were chosen from is not in it.
+        Written in the family the fit used, through the same builder PolyEmu
+        exports with, so the two agree term for term. The expression carries
+        only the SELECTED terms, which is the point of exporting a sparse fit:
+        the closure they were chosen from does not appear in it.
         """
-        import sympy as sp
+        from MomentEmu.emulator import symbolic_polynomial_expressions
 
-        if self.basis_kind != "monomial":
-            raise NotImplementedError(
-                f"symbolic export assumes a monomial basis and this fit used "
-                f"basis_kind={self.basis_kind!r}. Its coefficients belong to "
-                f"that family, so writing them as monomial coefficients would "
-                f"be silently wrong. Refit with basis_kind='monomial' to "
-                f"export symbolically."
-            )
-        mi = np.asarray(self.multi_indices)
-        n = int(mi.shape[1])
-        names = (
-            [f"x{i}" for i in range(n)] if variable_names is None
-            else [str(v) for v in variable_names]
+        # SparseEmu maps its box onto [-1, 1] as 2 (x - lo) / span - 1, which
+        # is (x - mean) / std with these two; the builder takes the variance.
+        scale = 0.5 * np.asarray(self.span_, dtype=np.float64)
+        return symbolic_polynomial_expressions(
+            np.asarray(self.coefficients, dtype=np.float64),
+            np.asarray(self.multi_indices),
+            variable_names=variable_names,
+            input_means=np.asarray(self.lo_, dtype=np.float64) + scale,
+            input_vars=scale**2,
+            output_means=np.asarray(self.mean_Y_, dtype=np.float64),
+            output_vars=np.asarray(self.scale_Y_, dtype=np.float64) ** 2,
+            family=self.basis_kind,
         )
-        if len(names) != n:
-            raise ValueError(f"expected {n} variable names, got {len(names)}")
-        xs = sp.symbols(names)
-        if n == 1:
-            xs = (xs,)
-        # The same box map the numpy model applies: 2 (x - lo) / span - 1.
-        z = [
-            2 * (xs[i] - sp.Float(float(self.lo_[i]))) / sp.Float(float(self.span_[i]))
-            - 1
-            for i in range(n)
-        ]
-        coeffs = np.asarray(self.coefficients, dtype=np.float64)
-        exprs = []
-        for j in range(coeffs.shape[1]):
-            total = sp.Integer(0)
-            for r, alpha in enumerate(mi):
-                term = sp.Float(float(coeffs[r, j]))
-                for i in np.flatnonzero(alpha):
-                    term = term * z[i] ** int(alpha[i])
-                total = total + term
-            exprs.append(
-                total * sp.Float(float(self.scale_Y_[j]))
-                + sp.Float(float(self.mean_Y_[j]))
-            )
-        return exprs
 
     @property
     def _plan_cls(self):

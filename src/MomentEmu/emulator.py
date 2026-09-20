@@ -440,7 +440,7 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
                                     output_means=None, output_vars=None,
                                     *, log_input=False, log_output=False,
                                     transform=None, input_transform=None,
-                                    raw_units=False):
+                                    raw_units=False, family="monomial"):
     """Convert emulator coefficients into sympy expressions (P2.4, D11).
 
     The default form keeps the standardized coordinates
@@ -449,6 +449,17 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
     to 8.3e-9 at n=6, d=6 in the review), so raw_units=True warns.
     log_input substitutes log of the input variables (backward export of a
     log_Y emulator); log_output wraps the result in exp(..., evaluate=False).
+
+    ``family`` names the basis the coefficients were fitted against, and the
+    expression is written in THAT basis: sympy's ``legendre`` and
+    ``chebyshevt`` agree with the package's recurrences to 4.4e-16. Printing
+    the numbers against monomials instead would be silently wrong, which is
+    why the export used to refuse anything else.
+
+    A tensor family clips its argument to [-1, 1], exactly as ``_TensorPlan``
+    does, and the clip is part of the expression rather than an assumption
+    about where it will be evaluated. Monomials are not clipped: they diverge
+    outside the box and that is the model a monomial fit describes.
     """
     import sympy as sp
 
@@ -466,11 +477,19 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
     n = mi.shape[1]
     if variable_names is None:
         variable_names = [f"x{i+1}" for i in range(n)]
+    elif len(variable_names) != n:
+        raise ValueError(
+            f"expected {n} variable names, one per input, got "
+            f"{len(variable_names)}"
+        )
     vars_sym = [sp.Symbol(name) for name in variable_names]
     input_mean = np.zeros(n) if input_means is None else np.asarray(input_means, float)
     input_std = np.ones(n) if input_vars is None else np.sqrt(np.asarray(input_vars, float))
     output_mean = np.zeros(m) if output_means is None else np.asarray(output_means, float)
     output_std = np.ones(m) if output_vars is None else np.sqrt(np.asarray(output_vars, float))
+    if family not in ("monomial", "legendre", "chebyshev"):
+        raise NotImplementedError(f"symbolic export has no basis {family!r}")
+    clip = family != "monomial"
     z_syms = sp.symbols([f"__z{i}" for i in range(n)])
     substitutions = {}
     for i in range(n):
@@ -487,19 +506,42 @@ def symbolic_polynomial_expressions(coeffs, multi_indices, variable_names=None,
                 )
         elif log_input:
             xi = sp.log(xi, evaluate=False)
-        substitutions[z_syms[i]] = (
+        zi = (
             xi - sp.Float(float(input_mean[i]), 17)
         ) / sp.Float(float(input_std[i]), 17)
+        substitutions[z_syms[i]] = sp.Max(-1, sp.Min(1, zi)) if clip else zi
+
+    # One table of the family's 1-D polynomials per variable, in the z symbol;
+    # the substitution above carries them into the caller's coordinates.
+    tables: list[list] = []
+    if clip:
+        for i in range(n):
+            top = int(mi[:, i].max()) if mi.size else 0
+            tables.append([
+                sp.legendre(k, z_syms[i]) * sp.sqrt(2 * k + 1)
+                if family == "legendre" else sp.chebyshevt(k, z_syms[i])
+                for k in range(top + 1)
+            ])
     expressions = []
     for j in range(m):
         terms: dict = {}
         for c, alpha in zip(coeffs[:, j], mi):
             key = tuple(int(a) for a in alpha)
             terms[key] = terms.get(key, sp.Integer(0)) + sp.Float(float(c), 17)
-        poly = sp.Poly.from_dict(terms, z_syms)
+        if clip:
+            total = sp.Integer(0)
+            for key, c in terms.items():
+                term = c
+                for i, a in enumerate(key):
+                    if a:
+                        term = term * tables[i][a]
+                total = total + term
+            base = total
+        else:
+            base = sp.Poly.from_dict(terms, z_syms).as_expr()
         # xreplace is a direct tree substitution and is ~8x faster than subs
         # here (0.019 s vs 0.157 s at D=462), which keeps the export under 0.1 s.
-        expr = poly.as_expr().xreplace(substitutions)
+        expr = base.xreplace(substitutions)
         if raw_units:
             expr = sp.expand(expr)
         if float(output_std[j]) != 1.0:
@@ -2844,13 +2886,6 @@ class PolyEmu:
         """
         _warn_export_conditioning(getattr(self, "forward_cond_est_", None), "forward")
         Y_var = np.ones(self.n_outputs) if not self.standardize_Y_with_std else self.scaler_Y.var_
-        if getattr(self, "basis_kind", "monomial") != "monomial":
-            raise NotImplementedError(
-                f"symbolic export assumes a monomial basis and this emulator "
-                f"was fitted with basis_kind={self.basis_kind!r}. Its "
-                "coefficients multiply Chebyshev polynomials, so reading them "
-                "as monomial coefficients would be silently wrong."
-            )
         exprs = symbolic_polynomial_expressions(
             self.forward_coeffs,
             self.forward_multi_indices,
@@ -2861,6 +2896,7 @@ class PolyEmu:
             output_vars=Y_var,
             transform=self._transforms(),
             raw_units=raw_units,
+            family=getattr(self, "basis_kind", "monomial"),
         )
         return exprs
 

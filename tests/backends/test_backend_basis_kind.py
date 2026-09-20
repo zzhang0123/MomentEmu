@@ -89,12 +89,29 @@ def test_jax_export_is_jittable(fitted) -> None:
 
 
 @pytest.mark.parametrize("kind", ("legendre", "chebyshev"))
-def test_symbolic_still_refuses_a_non_monomial_fit(kind: str) -> None:
-    """Pinned, not changed: a monomial expansion would lose the conditioning."""
+def test_symbolic_exports_a_non_monomial_fit_in_its_own_family(kind: str) -> None:
+    """This asserted a refusal, and the refusal was half right.
+
+    Reading the coefficients as monomial ones would indeed be silently wrong,
+    which is what it protected against. But that is an argument for printing
+    the family's own polynomials, not for declining to print anything, and
+    while it stood this test held the other two backends to the weakest of the
+    three. All three now export a non-monomial fit and agree with the numpy
+    model, which is what the comparison below has teeth against.
+    """
+    import sympy as sp
+
     X, Y = _design()
     emu = PolyEmu(X, Y, basis_kind=kind, max_degree_forward=4, verbose=0)
-    with pytest.raises(NotImplementedError, match="monomial"):
-        create_symbolic_emulator(emu)
+    bundle = create_symbolic_emulator(emu)
+    sym = bundle["emulator"]
+    got = np.column_stack([
+        np.asarray(f(*X[:16].T), dtype=float) * np.ones(16)
+        for f in sym.lambdified
+    ])
+    assert np.allclose(got, emu.forward_emulator(X[:16]), rtol=1e-9, atol=1e-10), kind
+    clipped = set().union(*(e.atoms(sp.Min, sp.Max) for e in sym.expressions))
+    assert clipped, f"{kind}: the export lost the clip _TensorPlan applies"
 
 
 def test_the_bases_disagree_so_the_checks_have_teeth() -> None:

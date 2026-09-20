@@ -44,6 +44,17 @@ from MomentEmu.warp import fit_warps
 ORDERS = ("none", "warp", "rotate", "rotate_warp", "warp_rotate")
 ESTIMATORS = ("polynomial", "sparse", "factored")
 
+DEFAULT_CAP_TERMS = 6000
+"""Basis size above which a candidate degree is refused regardless of the data.
+
+A memory and time ceiling, not a statement about the target: the moment matrix
+is ``D x D``, so 6,000 terms is a 288 MiB dense matrix before anything is
+solved. It is a default rather than a law, and ``PreconditionedEmu`` takes it
+as a keyword, because it can bind where the data would have supported more:
+at 5 dimensions with 24,562 rows it stops the degree at 11 although degree 12
+needs 6,188 terms and the sample rule allows 18,564.
+"""
+
 
 class _Rotate:
     """Standardise and project onto the leading active-subspace directions.
@@ -198,6 +209,31 @@ class PreconditionedEmu:
             that cuts seven dimensions to two can afford a far higher degree,
             and scoring every order at a degree the full-dimensional ones can
             reach would hide exactly the benefit rotation exists for.
+
+            It selects the ORDER and does not raise the degree of the model
+            that is finally fitted. The knobs that do are the ones the inner
+            estimator reads, passed through the remaining keywords:
+            ``max_degree_forward`` for the top of the sweep,
+            ``init_deg_forward`` for where it starts, and ``RMSE_tol`` for
+            when it stops climbing. ``report()["fitted_degree"]`` says which
+            degree was actually used, so a gap between that and
+            ``scan_degree`` is visible rather than inferred.
+
+            Wiring the two together is not the obvious improvement it looks.
+            Passing ``max_degree_forward=scan_degree`` lengthens the ladder
+            PolyEmu selects from, and its selection takes the simplest rung
+            within tolerance of the best: on a sharp tanh at 3 parameters and
+            4,000 samples, ``scan_degree=14`` alone fitted degree 12 at 17.93
+            percent, while adding ``max_degree_forward=14`` fitted degree 10
+            at 20.24 percent. Raise the inner knobs deliberately, and measure.
+        cap_terms: basis size above which a candidate degree is refused
+            whatever the sample count says, default
+            :data:`DEFAULT_CAP_TERMS`. It is a memory ceiling on the ``D x D``
+            moment matrix, not a statement about the target, and it can bind
+            where the data would have supported more: at 5 preconditioned
+            dimensions with 24,562 rows it stops the degree at 11, although
+            degree 12 needs 6,188 terms and the sample rule allows 18,564.
+            When it is what binds, the warning says so by name.
         scan_terms: active-set size used when scoring orders under the sparse
             estimator, capped at the caller's own ``n_terms``.
 
@@ -228,6 +264,7 @@ class PreconditionedEmu:
         scan_degree: int = 12,
         estimator: str = "polynomial",
         scan_terms: int = 60,
+        cap_terms: int = DEFAULT_CAP_TERMS,
         select: str = "accuracy",
         parsimony_tol: float = 2.0,
         validation_split: float = 0.2,
@@ -322,7 +359,8 @@ class PreconditionedEmu:
                 steps = build(name)
                 A = _chain(steps, X)
                 err, deg = _score(A, Y, keep, hold, scan_degree,
-                                  self.estimator, kwargs, scan_terms)
+                                  self.estimator, kwargs, scan_terms,
+                                  cap_terms=int(cap_terms))
                 built[name], dims[name] = steps, int(A.shape[1])
                 self.scores[name] = err
                 self.scan_degrees[name] = deg
@@ -348,16 +386,30 @@ class PreconditionedEmu:
         self._n_in = int(X.shape[1])
         A = self.transform(X)
         asked = kwargs.get("max_degree_forward") if estimator == "polynomial" else None
+        self.cap_terms = int(cap_terms)
         if asked is not None:
-            affordable = _affordable_degree(A.shape[1], X.shape[0], int(asked))
+            affordable, reason, blocked = _degree_limit(
+                A.shape[1], X.shape[0], int(asked), cap_terms=self.cap_terms,
+            )
             if affordable < int(asked):
-                warnings.warn(
-                    f"order {self.order!r} leaves {A.shape[1]} dimension(s), "
-                    f"where degree {asked} needs more samples than the "
-                    f"{X.shape[0]} available; using degree {affordable}",
-                    UserWarning,
-                    stacklevel=2,
-                )
+                if reason == "cap":
+                    # Naming the sample count here would send the reader after
+                    # data they do not need: the cap is a policy, and unlike
+                    # the sample rule the caller can move it.
+                    message = (
+                        f"order {self.order!r} leaves {A.shape[1]} dimension(s), "
+                        f"where degree {affordable + 1} needs {blocked} terms and "
+                        f"cap_terms={self.cap_terms} allows {self.cap_terms}; using "
+                        f"degree {affordable}. The {X.shape[0]} samples available "
+                        f"would support it, so raise cap_terms to lift this."
+                    )
+                else:
+                    message = (
+                        f"order {self.order!r} leaves {A.shape[1]} dimension(s), "
+                        f"where degree {asked} needs more samples than the "
+                        f"{X.shape[0]} available; using degree {affordable}"
+                    )
+                warnings.warn(message, UserWarning, stacklevel=2)
                 kwargs = dict(kwargs, max_degree_forward=affordable)
                 if kwargs.get("init_deg_forward") is not None:
                     kwargs["init_deg_forward"] = min(
@@ -411,6 +463,10 @@ class PreconditionedEmu:
             "estimator": self.estimator,
             "n_dims": int(self.transform(np.zeros((1, self._n_in))).shape[1]),
             "n_terms": _term_count(self.emulator),
+            # The degree the model actually carries, which is not scan_degree:
+            # that one chose the order. None for estimators without a degree.
+            "fitted_degree": getattr(self.emulator, "forward_degree", None),
+            "cap_terms": self.cap_terms,
         }
 
 
@@ -421,19 +477,41 @@ def _chain(steps, X):
     return out
 
 
-def _affordable_degree(n_dims, n_rows, ceiling, oversample=3, cap_terms=6000):
-    """Highest degree whose basis stays within the sample budget."""
+def _degree_limit(n_dims, n_rows, ceiling, oversample=3,
+                  cap_terms=DEFAULT_CAP_TERMS):
+    """Return ``(degree, reason, blocked_size)`` for the highest usable degree.
+
+    ``reason`` names what stopped the climb, so a caller can say which of the
+    three it was instead of guessing:
+
+    * ``"ceiling"`` -- the caller's own ceiling was reached, nothing bound;
+    * ``"samples"`` -- the next degree needs more rows than there are;
+    * ``"cap"`` -- the next degree fits the data but exceeds ``cap_terms``.
+
+    ``blocked_size`` is the term count of the degree that was refused, or 0
+    when nothing was. The sample rule is tested first, so a degree failing
+    both is reported as ``"samples"``: that one is a fact about the data and
+    the other is a policy.
+    """
     degree = 1
     while degree < int(ceiling):
-        size = generate_multi_indices(n_dims, degree + 1).shape[0]
-        if size * oversample > n_rows or size > cap_terms:
-            break
+        size = int(generate_multi_indices(n_dims, degree + 1).shape[0])
+        if size * oversample > n_rows:
+            return degree, "samples", size
+        if size > cap_terms:
+            return degree, "cap", size
         degree += 1
-    return degree
+    return degree, "ceiling", 0
+
+
+def _affordable_degree(n_dims, n_rows, ceiling, oversample=3,
+                       cap_terms=DEFAULT_CAP_TERMS):
+    """Highest degree whose basis stays within the sample budget."""
+    return _degree_limit(n_dims, n_rows, ceiling, oversample, cap_terms)[0]
 
 
 def _score(A, Y, keep, hold, ceiling, estimator="polynomial",
-           estimator_kwargs=None, scan_terms=60):
+           estimator_kwargs=None, scan_terms=60, cap_terms=DEFAULT_CAP_TERMS):
     """Held-out error of the ESTIMATOR THAT WILL BE USED on these coordinates.
 
     For the polynomial estimator each candidate order gets its own degree:
@@ -468,7 +546,7 @@ def _score(A, Y, keep, hold, ceiling, estimator="polynomial",
             return float("inf"), 0
         return float(np.sqrt(np.mean((pred - Y[hold]) ** 2))), int(kw.get("rank", 1))
     n = A.shape[1]
-    degree = _affordable_degree(n, keep.size, ceiling)
+    degree = _affordable_degree(n, keep.size, ceiling, cap_terms=cap_terms)
     plan = MonomialPlan.build(generate_multi_indices(n, degree))
     lo, hi = A[keep].min(axis=0), A[keep].max(axis=0)
     span = np.where(hi > lo, hi - lo, 1.0)

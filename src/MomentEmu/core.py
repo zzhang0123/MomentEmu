@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from MomentEmu.guards import (
+    COND_QR,
     COND_RAISE,
     COND_WARN,
     IllConditionedError,
@@ -98,6 +99,7 @@ def solve_emulator_coefficients(
     on_singular: str = "raise",
     warn_at: float = COND_WARN,
     raise_at: float = COND_RAISE,
+    qr_at: float = COND_QR,
     degree: int | None = None,
     return_cond: bool = False,
     Phi=None,
@@ -142,9 +144,11 @@ def solve_emulator_coefficients(
         n_samples=None,
         method="auto",
     )
-    if rep.level == "singular" and Phi is not None:
-        # P5.4: at cond >= 1e16 refit with CholeskyQR2 (Householder QR if its
-        # Cholesky fails / loses rank); the solve keeps the monomial-z basis.
+    if rep.cond >= qr_at and Phi is not None:
+        # P5.4 / T-001: at cond >= COND_QR refit with CholeskyQR2 (Householder
+        # QR if its Cholesky fails / loses rank); the solve keeps the
+        # monomial-z basis. QR works on Phi, whose condition number is the
+        # square root of M's, so it keeps roughly twice as many digits.
         if Y is None:
             Y = nu
         try:
@@ -184,6 +188,7 @@ def press_loo(
     on_singular: str = "warn",
     warn_at: float = COND_WARN,
     raise_at: float = COND_RAISE,
+    qr_at: float = COND_QR,
     degree: int | None = None,
     weights=None,
     plan=None,
@@ -239,13 +244,13 @@ def press_loo(
         nan = float("nan")
         return np.full_like(nu, nan), float("inf"), nan, np.full(nu.shape[1], nan), nan
     coeffs = cho_solve((cf, lower), nu, check_finite=False)
-    if rep.cond >= raise_at:
+    if rep.cond >= qr_at:
         # P5.4: make the QR refit reachable on the default LOO path; the
         # leverage below still comes from the (successful) Cholesky factor.
         Phi_qr = Phi if Phi is not None else plan.evaluate(X_scaled)
         coeffs_qr, _ = solve_emulator_coefficients(
             M, nu, on_singular=on_singular, warn_at=warn_at, raise_at=raise_at,
-            degree=degree, return_cond=True, Phi=Phi_qr, Y=Y,
+            qr_at=qr_at, degree=degree, return_cond=True, Phi=Phi_qr, Y=Y,
         )
         if np.isfinite(coeffs_qr).all():
             coeffs = coeffs_qr

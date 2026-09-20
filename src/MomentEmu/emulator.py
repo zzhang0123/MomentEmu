@@ -5,7 +5,7 @@ import os
 import warnings
 from collections import Counter
 from itertools import combinations_with_replacement
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -18,6 +18,7 @@ from MomentEmu.core import (
     solve_emulator_coefficients,
 )
 from MomentEmu.guards import (
+    COND_QR,
     COND_RAISE,
     DomainBox,
     ExtrapolationWarning,
@@ -35,6 +36,7 @@ from MomentEmu.guards import (
     check_sweep_rmse,
     check_test_pair,
     check_xy_shapes,
+    connected_components,
     count_distinct_rows,
     extrapolation_distance,
     fit_domain_box,
@@ -45,6 +47,46 @@ from MomentEmu.monomials import (
     MonomialPlan,
     fold_output_affine,
 )
+
+#: An output column whose variation sits below this fraction of its own
+#: magnitude carries no recoverable structure: its Legendre coefficients are
+#: rounding noise, and normalising them by their own sum yields O(0.1)
+#: "shares" indistinguishable from a real coupling.
+_DEGENERATE_REL = 1e-10
+
+
+def _degenerate_columns(fit: _LegendreFit) -> np.ndarray:
+    """Output columns whose variation is at the rounding level of their scale.
+
+    Their Legendre coefficients are noise, so normalising them by their own sum
+    gives O(0.1) shares that are indistinguishable from a real signal.
+    """
+    const_row = int(np.flatnonzero(~fit.mi.any(axis=1))[0])
+    signal_scale = np.maximum(
+        np.abs(fit.coef[const_row]), np.sqrt(np.maximum(fit.total_var, 0.0))
+    )
+    return fit.explained <= (_DEGENERATE_REL * signal_scale) ** 2
+
+
+class _LegendreFit(NamedTuple):
+    """One orthonormal-Legendre projection of Y over the training box.
+
+    Every coefficient is an ANOVA component: ``coef[r] ** 2`` is the variance
+    the interaction ``supp(mi[r])`` carries, so both the Sobol report and the
+    interaction graph read the same numbers.
+    """
+
+    degree: int
+    mi: np.ndarray            # (n_terms, n) multi-indices
+    coef: np.ndarray          # (n_terms, m) Legendre coefficients
+    var_terms: np.ndarray     # (n_terms, m) coef ** 2
+    explained: np.ndarray     # (m,) variance carried by the non-constant terms
+    total_var: np.ndarray     # (m,) empirical Var(Y)
+    denom: np.ndarray         # (m,) explained, floored at 1 where it vanishes
+    safe_total: np.ndarray    # (m,) total_var, floored at 1 where it vanishes
+    n_terms: int
+    n_samples: int
+
 
 # Memory budget for a backward-sweep moment matrix M (D x D float64). The
 # backward basis is built from n_outputs, which can be thousands of CMB bins,
@@ -828,6 +870,32 @@ class PolyEmu:
                 "Fit the forward model with basis=, or fit the backward model only "
                 "(forward=False, backward=True) without basis."
             )
+        # A Basis degree is a constraint like every other Basis constraint, so
+        # it must not be silently overridden by the sweep. degree and
+        # max_degree_forward are the same knob -- the top of the forward sweep --
+        # so a disagreement is an error rather than a silent win for either.
+        # init_deg_forward is a different knob (where the sweep starts) and is
+        # left alone unless it starts above the cap.
+        # getattr: a duck-typed basis only has to provide build() and spec().
+        _basis_degree = None if basis is None else getattr(basis, "degree", None)
+        if _basis_degree is not None:
+            if max_degree_forward is not None and int(max_degree_forward) != _basis_degree:
+                raise ValueError(
+                    f"basis={basis.spec()} and max_degree_forward = "
+                    f"{int(max_degree_forward)} both set the top of the forward degree "
+                    f"sweep and disagree. The Basis degree bounds the index set, so the "
+                    f"sweep cannot run past it. Drop max_degree_forward to sweep up to "
+                    f"the Basis degree ({_basis_degree}), or build the Basis without a "
+                    f"degree to let max_degree_forward drive the sweep."
+                )
+            if init_deg_forward is not None and int(init_deg_forward) > _basis_degree:
+                raise ValueError(
+                    f"init_deg_forward = {int(init_deg_forward)} starts the forward "
+                    f"degree sweep above the degree of basis={basis.spec()}, so no rung "
+                    f"of the sweep is admissible. Lower init_deg_forward to at most "
+                    f"{_basis_degree}, or raise the Basis degree."
+                )
+            max_degree_forward = _basis_degree
         self.parameter_names = list(parameter_names) if parameter_names is not None else [f"x{i}" for i in range(X.shape[1])]
 
         self.n_params = X.shape[1]
@@ -1066,6 +1134,13 @@ class PolyEmu:
                 init_deg = 3
             else:
                 init_deg = 2
+            # A Basis degree caps max_degree, and the heuristic above can start
+            # above a low cap (Basis(degree=0) with n_params > 6). The cap is a
+            # deliberate user constraint, so the default start yields to it; an
+            # explicit init_deg_forward above the cap is rejected in __init__.
+            _bd = None if self.basis is None else getattr(self.basis, "degree", None)
+            if _bd is not None:
+                init_deg = min(init_deg, _bd)
 
         check_degree_range(
             init_deg,
@@ -1303,7 +1378,7 @@ class PolyEmu:
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
                 )
-                if cond >= COND_RAISE:
+                if cond >= COND_QR:
                     # P5.4: refit this rung with CholeskyQR2 / Householder QR.
                     _Phi_qr = MonomialPlan.build(multi_indices).evaluate(X_train_scaled)
                     _c_qr, _cond_qr = solve_emulator_coefficients(
@@ -1871,24 +1946,20 @@ class PolyEmu:
                     stacklevel=2,
                 )
 
-    def sobol_report(
+    def _legendre_terms(
         self,
         degree: int | None = None,
         X: Any | None = None,
         Y: Any | None = None,
         warn_uniform: bool = True,
         max_terms: int = 4096,
-    ) -> dict:
-        """Legendre-based Sobol report on the training box (P5.5).
+    ) -> _LegendreFit:
+        """Project Y onto the orthonormal Legendre product basis over the box.
 
-        The training outputs are projected onto an orthonormal Legendre basis
-        over the training box by a Cholesky solve (cho_solve), which is well
-        conditioned for this basis. Inputs are treated as uniform on the box; a
-        non-uniform design raises a UserWarning because the indices are then
-        box-uniform quantities. Returns S1, ST, the top pairwise shares and the
-        variance broken down by per-parameter degree. The shares are normalised
-        by the variance captured by the fit (they sum to one), while
-        explained_fraction reports that variance as a fraction of Var(Y).
+        Shared by sobol_report (P5.5) and interaction_graph (T-001) so both
+        read the same decomposition. The basis is orthonormal for a uniform
+        design, which makes every coefficient an ANOVA component: coef[r]**2
+        is the variance carried by the interaction supp(mi[r]).
         """
         d = int(self.forward_degree if degree is None else degree)
         n = int(self.n_params)
@@ -1954,6 +2025,43 @@ class PolyEmu:
         # Legendre decomposition), not the empirical sample variance.
         denom = np.where(explained > 0, explained, 1.0)
         safe_total = np.where(total_var > 0, total_var, 1.0)
+        return _LegendreFit(
+            degree=d,
+            mi=mi,
+            coef=coef,
+            var_terms=var_terms,
+            explained=explained,
+            total_var=total_var,
+            denom=denom,
+            safe_total=safe_total,
+            n_terms=n_terms,
+            n_samples=int(X.shape[0]),
+        )
+
+    def sobol_report(
+        self,
+        degree: int | None = None,
+        X: Any | None = None,
+        Y: Any | None = None,
+        warn_uniform: bool = True,
+        max_terms: int = 4096,
+    ) -> dict:
+        """Legendre-based Sobol report on the training box (P5.5).
+
+        The training outputs are projected onto an orthonormal Legendre basis
+        over the training box by a Cholesky solve (cho_solve), which is well
+        conditioned for this basis. Inputs are treated as uniform on the box; a
+        non-uniform design raises a UserWarning because the indices are then
+        box-uniform quantities. Returns S1, ST, the top pairwise shares and the
+        variance broken down by per-parameter degree. The shares are normalised
+        by the variance captured by the fit (they sum to one), while
+        explained_fraction reports that variance as a fraction of Var(Y).
+        """
+        fit = self._legendre_terms(degree, X, Y, warn_uniform, max_terms)
+        d, mi, n_terms = fit.degree, fit.mi, fit.n_terms
+        n, m = int(self.n_params), int(self.n_outputs)
+        var_terms, explained, total_var = fit.var_terms, fit.explained, fit.total_var
+        denom, safe_total = fit.denom, fit.safe_total
         S1 = np.zeros((n, m))
         ST = np.zeros((n, m))
         var_by_degree = np.zeros((n, d + 1, m))
@@ -1980,7 +2088,7 @@ class PolyEmu:
             "parameter_names": list(self.parameter_names),
             "degree": d,
             "n_terms": n_terms,
-            "n_samples": int(X.shape[0]),
+            "n_samples": fit.n_samples,
             "S1": S1 / denom[None, :],
             "ST": ST / denom[None, :],
             "top_pairs": [(int(i), int(j), pair_var[(i, j)] / denom) for i, j in pair_keys],
@@ -1991,6 +2099,220 @@ class PolyEmu:
             # P5.5: the fraction of Var(Y) the orthonormal decomposition
             # accounts for; meaningful, not identically one.
             "shares_sum": explained / safe_total,
+        }
+
+    def interaction_graph(
+        self,
+        degree: int | None = None,
+        X: Any | None = None,
+        Y: Any | None = None,
+        threshold: float = 1e-4,
+        output: int | None = None,
+        warn_uniform: bool = True,
+        max_terms: int = 4096,
+        min_explained: float = 0.9,
+    ) -> dict:
+        """Full pairwise interaction matrix and the blocks it implies (T-001).
+
+        ``matrix[i, j]`` is the share of the explained variance carried by every
+        Legendre term whose support contains both parameters, so a pure
+        three-way coupling x_i x_j x_k registers on all three of its pairs.
+        This is the quantity that decides whether two parameters may sit in
+        different blocks of an additively separable model; ``sobol_report``
+        instead reports only terms of support exactly two, and only the top ten
+        of them, which hides a cross-block pair as soon as n grows.
+
+        ``blocks`` are the connected components of ``matrix > threshold``. Feed
+        them straight to :meth:`MomentEmu.basis.Basis.separable`.
+
+        The projection can only see interactions it can represent: an even
+        coupling such as x_i^2 x_j^2 needs ``degree >= 4``. A projection that
+        explains less than ``min_explained`` of Var(Y) warns, because absence of
+        interaction is not evidence when the fit itself is poor.
+
+        Args:
+            degree: Legendre degree; defaults to the fitted forward degree.
+            X, Y: design and outputs; default to the training data.
+            threshold: variance share above which a pair is called coupled.
+                It is a VARIANCE share, so it is the square of the amplitude
+                share: the 1e-4 default treats a coupling contributing less
+                than 1% of the signal amplitude as absent. Measured on a
+                9-parameter separable function at degree 4, the numerical
+                noise floor was 3.4e-6 and a real 0.25 x0^2 x3^2 coupling read
+                5.3e-4, so the default sits between them with margin.
+            output: restrict to one output column; default aggregates by max.
+            min_explained: warn below this explained fraction of Var(Y).
+
+        Returns:
+            dict with matrix (n, n), blocks, separable, threshold, degree,
+            explained_variance, explained_fraction, n_samples,
+            degenerate_outputs, parameter_names.
+        """
+        if threshold < 0.0:
+            raise ValueError(f"threshold must be >= 0, got {threshold}")
+        n, m = int(self.n_params), int(self.n_outputs)
+        if output is not None:
+            output = int(output)
+            if not 0 <= output < m:
+                raise ValueError(f"output must be in [0, {m}), got {output}")
+        fit = self._legendre_terms(degree, X, Y, warn_uniform, max_terms)
+
+        degenerate = _degenerate_columns(fit)
+        degenerate_outputs = tuple(int(i) for i in np.flatnonzero(degenerate))
+        cols = self._usable_columns(degenerate, output, "blocks")
+        shares = fit.var_terms[:, cols] / fit.denom[cols][None, :]
+        matrix = np.zeros((n, n))
+        for r in range(fit.n_terms):
+            support = np.flatnonzero(fit.mi[r])
+            if support.size < 2:
+                continue
+            contrib = float(np.max(shares[r]))
+            for a in range(support.size):
+                for b in range(a + 1, support.size):
+                    i, j = int(support[a]), int(support[b])
+                    matrix[i, j] += contrib
+                    matrix[j, i] += contrib
+
+        explained_fraction = fit.explained[cols] / fit.safe_total[cols]
+        if float(np.min(explained_fraction)) < min_explained:
+            warnings.warn(
+                f"the degree-{fit.degree} Legendre projection explains only "
+                f"{float(np.min(explained_fraction)):.3f} of Var(Y) (< {min_explained}); "
+                "an interaction hidden in the unexplained variance would not appear "
+                "in this graph, so raise the degree before trusting the blocks",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        blocks = connected_components(matrix > threshold)
+
+        return {
+            "matrix": matrix,
+            "blocks": blocks,
+            "separable": len(blocks) > 1,
+            "threshold": float(threshold),
+            "degree": fit.degree,
+            "explained_variance": fit.explained[cols],
+            "explained_fraction": explained_fraction,
+            "n_samples": fit.n_samples,
+            "degenerate_outputs": degenerate_outputs,
+            "parameter_names": list(self.parameter_names),
+        }
+
+    def _usable_columns(self, degenerate, output, what: str):
+        """Output columns to read structure from; raise or warn on degenerate ones."""
+        m = int(self.n_outputs)
+        if output is not None:
+            if degenerate[output]:
+                raise ValueError(
+                    f"output {output} is degenerate: its variation is at the "
+                    "rounding level of its own magnitude, so no structure can "
+                    "be read from it"
+                )
+            return np.array([int(output)])
+        cols = np.flatnonzero(~degenerate)
+        if cols.size == 0:
+            raise ValueError(
+                f"all {m} output(s) are degenerate: their variation is at the "
+                "rounding level of their own magnitude, so no structure can be "
+                "read from them"
+            )
+        if cols.size < m:
+            names = tuple(int(i) for i in np.flatnonzero(degenerate))
+            warnings.warn(
+                f"ignoring {m - cols.size} degenerate output column(s) {names}: "
+                "their variation is at the rounding level of their own "
+                f"magnitude, and including them would corrupt the {what}",
+                UserWarning,
+                stacklevel=3,
+            )
+        return cols
+
+    def degree_profile(
+        self,
+        degree: int | None = None,
+        X: Any | None = None,
+        Y: Any | None = None,
+        tol: float = 1e-6,
+        parity_tol: float = 1e-3,
+        output: int | None = None,
+        warn_uniform: bool = True,
+        max_terms: int = 4096,
+    ) -> dict:
+        """Per-parameter maximum useful degree and parity (T-001).
+
+        Reads the orthonormal Legendre decomposition to find, for each
+        parameter, the highest power that carries variance and whether only
+        even powers do. A target that depends on a parameter only through its
+        square needs no odd powers of it at all, and a target that is exactly
+        quadratic in a parameter needs no power above two; both are pure
+        redundancy in the isotropic basis.
+
+        Parity is reported as "even" or None only. Reporting "odd" would
+        require the target to be globally odd in that parameter, so that no
+        term omits it, which this decomposition cannot establish from the
+        powers alone; ``Basis`` still accepts "odd" when the caller knows it.
+
+        Redundant terms do not bias the fit -- the true coefficients are zero
+        and least squares recovers that in the population limit -- so the gain
+        is in sample count, memory and conditioning rather than in accuracy at
+        a sample size that is already ample.
+
+        Args:
+            degree: Legendre degree; defaults to the fitted forward degree.
+            tol: share of the explained variance below which a power counts as
+                absent. It is a VARIANCE share, so the induced amplitude error
+                is its square root: the 1e-6 default caps a parameter's degree
+                only once the discarded powers are under 1e-3 in amplitude.
+                Unlike a block boundary, where the cross terms are structurally
+                zero, a degree cap truncates a convergent series, so raising
+                this introduces real bias rather than just removing redundancy.
+            parity_tol: a parameter is called "even" when its odd powers carry
+                less than this fraction of the variance its even powers carry.
+                This is deliberately relative, not absolute: the odd-power
+                share of a genuinely even parameter is sampling noise, whose
+                absolute size depends on N and would otherwise have to be
+                guessed.
+            output: restrict to one output; default aggregates by max.
+
+        Returns:
+            dict with max_degree, parity, basis (a ready-to-use Basis),
+            variance_by_degree, degree, degenerate_outputs.
+        """
+        from MomentEmu.basis import Basis
+
+        fit = self._legendre_terms(degree, X, Y, warn_uniform, max_terms)
+        degenerate = _degenerate_columns(fit)
+        cols = self._usable_columns(degenerate, output, "degree profile")
+        shares = fit.var_terms[:, cols] / fit.denom[cols][None, :]
+
+        n, d = int(self.n_params), fit.degree
+        var_by_degree = np.zeros((n, d + 1))
+        for r in range(fit.n_terms):
+            alpha = fit.mi[r]
+            contrib = float(np.max(shares[r]))
+            for i in np.flatnonzero(alpha):
+                var_by_degree[i, alpha[i]] += contrib
+
+        max_degree, parity = [], []
+        for i in range(n):
+            active = [k for k in range(1, d + 1) if var_by_degree[i, k] > tol]
+            max_degree.append(max(active) if active else 0)
+            odd = float(sum(var_by_degree[i, k] for k in range(1, d + 1, 2)))
+            even = float(sum(var_by_degree[i, k] for k in range(2, d + 1, 2)))
+            parity.append("even" if even > 0.0 and odd < parity_tol * even else None)
+
+        return {
+            "max_degree": tuple(max_degree),
+            "parity": tuple(parity),
+            "basis": Basis(
+                per_parameter=tuple(max_degree),
+                parity=tuple(parity) if any(p is not None for p in parity) else None,
+            ),
+            "variance_by_degree": var_by_degree,
+            "degree": d,
+            "degenerate_outputs": tuple(int(i) for i in np.flatnonzero(degenerate)),
+            "parameter_names": list(self.parameter_names),
         }
 
     def _transforms(self):
@@ -2214,7 +2536,7 @@ class PolyEmu:
                 coeffs, cond = solve_emulator_coefficients(
                     M, nu, on_singular="warn", degree=d, return_cond=True
                 )
-                if cond >= COND_RAISE:
+                if cond >= COND_QR:
                     _Phi_qr = MonomialPlan.build(multi_indices).evaluate(Y_train_scaled)
                     _c_qr, _cond_qr = solve_emulator_coefficients(
                         M, nu, on_singular="warn", degree=d, return_cond=True,

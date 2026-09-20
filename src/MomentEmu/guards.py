@@ -30,6 +30,13 @@ FLOAT64_DIGITS = -math.log10(EPS64)               # 15.65
 FILL_FACTOR = 2.0        # require N_train >= FILL_FACTOR * D before warning
 COND_WARN = 1e12         # coefficients keep ~4 digits; export unreliable
 COND_RAISE = 1e16        # beyond 1/eps: M numerically singular
+# Refit with QR at or above this cond(M). Kept separate from COND_RAISE, which
+# is the hard-error level: forming M squares the conditioning, so the normal
+# equations lose accuracy long before M is singular. Measured through the fit
+# path (T-001): the stored coefficients were 47x worse than a QR solve at
+# cond_est 1.7e13 and 230x worse at 2.0e15, both below COND_RAISE, while every
+# rung at or above COND_RAISE was already accurate because QR fired there.
+COND_QR = 1e13
 SWEEP_BLOWUP_FACTOR = 10.0
 COLLINEAR_RTOL = 1e-12
 
@@ -191,6 +198,34 @@ def count_axis_levels(X: np.ndarray, *, rtol: float = 1e-9) -> np.ndarray:
         gaps = np.diff(col)
         counts[i] = 1 + int(np.count_nonzero(gaps > tol))
     return counts
+
+
+def connected_components(adjacency: np.ndarray) -> tuple[tuple[int, ...], ...]:
+    """Connected components of a boolean adjacency matrix, sorted.
+
+    Shared by the additive (interaction_graph) and multiplicative
+    (multiplicative_blocks) structure detectors so both group parameters the
+    same way. Nodes are marked on push, not on pop, so no node is queued twice.
+    """
+    a = np.asarray(adjacency, dtype=bool)
+    if a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError(f"adjacency must be square 2-D, got shape {a.shape}")
+    n = a.shape[0]
+    seen = np.zeros(n, dtype=bool)
+    components = []
+    for start in range(n):
+        if seen[start]:
+            continue
+        seen[start] = True
+        stack, group = [start], [start]
+        while stack:
+            u = stack.pop()
+            for v in np.flatnonzero(a[u] & ~seen):
+                seen[v] = True
+                group.append(int(v))
+                stack.append(int(v))
+        components.append(tuple(sorted(group)))
+    return tuple(sorted(components))
 
 
 def check_axis_levels(X: np.ndarray, *, rtol: float = 1e-9) -> tuple[np.ndarray, np.ndarray]:

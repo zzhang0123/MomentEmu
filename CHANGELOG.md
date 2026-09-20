@@ -4,6 +4,169 @@ All notable changes to MomentEmu are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `PolyEmu.interaction_graph()` (T-001): the full n x n pairwise interaction
+  matrix from the orthonormal Legendre projection, plus the connected
+  components ("blocks") it implies. Unlike `sobol_report`, which reports only
+  the ten largest pairs of support exactly two, this counts every term whose
+  support contains both parameters, so a pure three-way coupling registers on
+  all three of its pairs and no cross-block pair is crowded out by in-block
+  pairs. The threshold is a VARIANCE share, so it is the square of the
+  amplitude share. The projection only sees interactions it can represent: an
+  even coupling such as x_i^2 x_j^2 needs degree >= 4. A projection explaining
+  less than `min_explained` of Var(Y) warns.
+- `Basis(blocks=...)` and `Basis.separable(blocks, degree=...)` (T-001): an
+  index set in which every support lies inside one block of a partition of the
+  parameters, which is the index set an additively separable
+  f(theta) = sum_k f_k(theta_{B_k}) needs. The count drops from C(p+d, d) to
+  1 + sum_k [C(p_k+d, d) - 1]: 230,230 to 1,845 at p=20, d=6 with four blocks
+  of five, and the dense moment matrix from 404 GiB to 26 MiB. `blocks` must
+  partition the parameters; the per-block enumeration is used directly rather
+  than filtering the (d+1)**n product, which is unusable at those sizes. Rows
+  stay sorted by (degree, index), so the degree sweep keeps bordering the
+  previous moment matrix incrementally.
+
+- `Basis(parity=...)` (T-001): per-parameter `"even"`/`"odd"` power constraint.
+  A target entering a parameter only through its square needs no odd powers of
+  it. On a 5-parameter degree-7 example the isotropic 792 terms drop to 546
+  with `per_parameter` caps alone and to 223 once parity is applied.
+- `PolyEmu.degree_profile()` (T-001): reads the Legendre decomposition and
+  reports each parameter's highest variance-carrying power and whether only
+  even powers carry variance, returning a ready-to-use `Basis`. Parity uses a
+  relative odd-versus-even criterion because the odd share of a genuinely even
+  parameter is sampling noise whose absolute size depends on N. Only `"even"`
+  is inferred: `"odd"` would require the target to be globally odd in that
+  parameter, which the powers alone cannot establish.
+
+### Added
+
+- `MomentEmu.rotation` (T-002 / P2): `ActiveSubspaceEmu` fits the forward model
+  in the leading eigenvectors of the gradient covariance `C = E[J^T J]`, and
+  `scan_rank` reports accuracy against coefficient count over a set of ranks.
+  A ridge target is low dimensional in the right coordinates while carrying
+  interactions at every ANOVA order in the original ones, which is why
+  interaction-order truncation saturates on it and rotation does not. Measured
+  on a travelling-trough target, rank 2 at degree 12 used 91 coefficients
+  against the isotropic degree-7 basis's 3,432 and was 1.6x more accurate.
+  `rank="auto"` reaches a variance target and no further, which overshoots on a
+  shallow spectrum tail; `scan_rank` is what locates the knee.
+- `MomentEmu.factored` (T-002): `FactoredEmu` fits a rank-R canonical product
+  over parameter blocks by alternating least squares, for multiplicative
+  structure that `Basis(blocks=...)` cannot express. Multiplicative
+  separability is a low-rank coefficient tensor over a full tensor-product
+  index set, not sparsity, so it needs a multilinear fit rather than a
+  different index set. It handles sign-changing data, which the log transform
+  cannot. `separability_report` verifies a candidate partition against two
+  log-free criteria: `H_ij = d2f/di dj` for additive structure and
+  `M_ij = f d2f/di dj - (df/di)(df/dj)`, the numerator of `d2 log f/di dj`, for
+  multiplicative structure.
+- `guards.connected_components`, shared by the additive and multiplicative
+  structure detectors.
+- `MomentEmu.sparse` (T-002 / P3): `SparseEmu` selects the index set *from* the
+  response over a large candidate set by simultaneous orthogonal matching
+  pursuit, expressing asymmetries no prior truncation can state. On a target
+  needing degree 18 in one direction and 2 in another, 60 of 1,621 candidates
+  beat the isotropic degree-8 basis of 1,287 terms.
+
+  Two constraints shaped it. A Gram matrix over the candidate set is not an
+  option -- `D x D` at 86,976 candidates is 60 GB -- so the search extends a
+  Cholesky factor of the active block only, which is `k x k`. And selection
+  runs in the orthonormal Legendre basis, not in monomials: greedy selection
+  needs a dictionary of low mutual coherence, and on [-1, 1] the monomial
+  dictionary of degrees 0-18 has coherence 0.9984 against the Legendre basis's
+  0.0086, so the greedy step picks a neighbouring power at random. Sparsity is
+  a property of a basis, not of a function; what transfers between bases is
+  accuracy per retained term. The index set is shared across outputs, which
+  keeps inference a single GEMM.
+
+### Fixed (performance)
+
+- `Basis.build` enumerated the `(d+1)**n` box and filtered it, so the cost did
+  not depend on how small the constrained basis was. At n=7 a
+  `max_interaction=1` basis of 85 terms took 56.8 s at degree 12 and did not
+  finish at degree 20, which made `max_interaction` and `q_norm` unreachable
+  past degree ~10 -- the regime they exist for. At n=9 a `max_interaction=1`
+  basis of 64 terms took 125.8 s at degree 7, visiting 134,217,728 candidates
+  to keep 11,440.
+
+  It now searches the admissible set by a depth-first descent carrying the
+  remaining degree, at a cost set by the answer rather than by the box. Every
+  constraint prunes the descent: the degree budget, the per-parameter bounds,
+  `max_interaction`, the group limits, and parity, which becomes the step of
+  each position rather than a filter over the output. The q-norm prunes with a
+  1e-9 relative slack and the exact `d + 1e-12` test still decides, so the
+  tie-break stays where it was. The degree-7 basis above now takes under a
+  millisecond; at p=20, d=6, `parity="even"` takes 7 ms, `max_interaction=2`
+  13 ms and `q=0.5` 5 ms, sizes at which the box is 7**20 candidates. Rows and
+  row order are unchanged, checked row for row against the box enumeration
+  over 574 constraint combinations including the empty and degenerate corners.
+
+### Changed (default behaviour)
+
+- `guards.COND_QR = 1e13` (T-001): the QR refit is now gated on its own
+  threshold instead of reusing `COND_RAISE`. The two were conflated, but they
+  answer different questions: `COND_RAISE = 1e16` is where M is numerically
+  singular, while forming `M = Phi^T Phi` squares the conditioning, so the
+  normal equations start losing digits far earlier. `COND_RAISE` is unchanged,
+  so no fit that works today starts raising.
+
+  Measured through the fit path on a 4-parameter target, the stored
+  coefficients improved from 4.9e-11 to 2.6e-14 at degree 14 and from 6.3e-10
+  to 1.4e-14 at degree 16, both rungs sitting below the old trigger. The
+  honest magnitude: predictions were already far inside any practical
+  tolerance before the change, so this buys coefficient accuracy rather than
+  usable prediction accuracy, and it matters where coefficients are read
+  directly -- symbolic export (which already warns from cond 1e8) and
+  derivatives. A target limited by truncation rather than conditioning is
+  unaffected. Cost is 1.76x on a rung that triggers and nothing on one that
+  does not.
+
+### Fixed
+
+- `interaction_graph` and `degree_profile` now exclude output columns whose
+  variation is at the rounding level of their own magnitude. Such a column's
+  Legendre coefficients are noise, and normalising them by their own sum gave
+  O(0.1) "shares"; because the default aggregation takes the max over outputs,
+  one constant column merged every parameter into a single block. Degenerate
+  columns are reported in `degenerate_outputs`, warned about when skipped, and
+  raise when all outputs or an explicitly requested output is degenerate.
+- `Basis` gained `__setstate__`, so a `Basis` pickled before a field existed
+  (directly or nested in a `PolyEmu`) no longer raises `AttributeError` from
+  `build`, `spec` or `==`. Same failure class as the B1 guard in
+  `PolyEmu._transforms`.
+- `Basis.build` validates `blocks` eagerly rather than inside the enumeration
+  generator, where the checks would not run until the first item was drawn,
+  and rejects an empty inner block.
+
+### Notes
+
+- Redundant basis terms do not bias the fit: the true coefficients are zero and
+  least squares recovers that in the population limit, so the cost is sample
+  count, memory and conditioning rather than accuracy at an ample N. Measured
+  on a 5-parameter degree-7 target, caps plus parity cut the basis from 792 to
+  223 terms and the test error by 17 percent at N=2000 and 7 percent at N=8000.
+- The reduction is exactly lossless when f is block separable and the design is
+  a product measure (a Latin hypercube or uniform box qualifies). A coupling
+  across blocks is not recoverable afterwards: confirm the blocks with
+  `interaction_graph()` first. Separability that holds only in a rotated frame
+  gives no reduction in the original coordinates.
+
+### Changed (Basis degree)
+
+- `Basis(degree=...)` now sets the top of the forward degree sweep instead of
+  being silently discarded. `PolyEmu(X, Y, basis=Basis(degree=2))` fits degree
+  2; previously the sweep ignored the Basis degree and ran to
+  `max_degree_forward` (or the sample-count cap), because `Basis.build` takes
+  the degree the caller passes in preference to its own. `max_degree_forward`
+  sets the same quantity, so passing both with different values now raises
+  `ValueError` rather than letting one win silently. `init_deg_forward` sets
+  where the sweep starts and is unaffected below the Basis degree; above it,
+  it raises. The heuristic default start is lowered to the Basis degree when it
+  would overshoot, so `Basis(degree=0)` fits the constant term.
+
 ## [2.0.0] - 2026-09-11
 
 This release makes the package importable from the repository, fixes several

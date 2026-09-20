@@ -416,8 +416,6 @@ def test_inverse_returns_conditional_mean():
 
 
 def test_jax_float32_default_silent():
-    import inspect
-
     from MomentEmu.jax_momentemu import JaxEmulator
 
     rng = np.random.default_rng(40)
@@ -426,7 +424,18 @@ def test_jax_float32_default_silent():
     e = PolyEmu(X, Y, max_degree_forward=3, verbose=0)
     je = JaxEmulator.from_polyemu(e)
     assert je.dtype == jax.numpy.float64
-    assert "enable_x64" in inspect.getsource(JaxEmulator.from_polyemu)
+    # The finding was a SILENT float32 default. This asserted the guard by
+    # looking for "enable_x64" in the source text of from_polyemu, which broke
+    # when the check moved into a helper both constructors share (T-010).
+    # Assert the behaviour instead: asking for float64 with x64 off must raise,
+    # which is what the finding was about and is stronger than the text.
+    old = jax.config.jax_enable_x64
+    try:
+        jax.config.update("jax_enable_x64", False)
+        with pytest.raises(ValueError, match="enable_x64"):
+            JaxEmulator.from_polyemu(e)
+    finally:
+        jax.config.update("jax_enable_x64", old)
 
 
 def test_degree_sweep_rebuilds_moments():

@@ -12,6 +12,7 @@ equinox dependency and no eqx.filter_jit.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -76,6 +77,18 @@ def _tensor_design(Xs, multi_indices, family, table_degree, n_params):
         table = _one_dimensional_table(Z[:, i], family, table_degree)
         out = out * jnp.take(table, multi_indices[:, i], axis=1)
     return out
+
+
+def _resolve_dtype(dtype):
+    """Default to float64 and refuse it when x64 is off, naming the fix."""
+    if dtype is None:
+        dtype = jnp.float64
+    if dtype == jnp.float64 and not jax.config.jax_enable_x64:
+        raise ValueError(
+            "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
+            "float64; enable x64 or pass dtype=jnp.float32 explicitly."
+        )
+    return dtype
 
 
 @dataclass(frozen=True)
@@ -202,16 +215,87 @@ class JaxEmulator:
         return _JITTED_HESSIAN(self, X)
 
     @classmethod
+    @classmethod
+    def from_sparse(cls, emulator, *, dtype=None):
+        """Export a :class:`MomentEmu.sparse.SparseEmu` fitted in a tensor basis.
+
+        The monomial family is refused rather than exported. This kernel
+        evaluates monomials from the downward-closed level tables a
+        ``MonomialPlan`` carries, and a SELECTED index set is not downward
+        closed -- that is what sparsity means. Rebuilding the closure would
+        put back exactly the terms the selection removed, so the fit that
+        arrived would not be the fit that is evaluated.
+
+        A tensor family needs no closure: it is evaluated from its
+        multi-indices and its own recurrence, which is the path T-007 added.
+        """
+        from MomentEmu.emulator import BASIS_PLANS
+        from MomentEmu.monomials import fold_output_affine
+
+        dtype = _resolve_dtype(dtype)
+        family = str(getattr(emulator, "basis_kind", "legendre"))
+        if family == "monomial":
+            raise NotImplementedError(
+                "a sparse monomial fit cannot be exported: this kernel "
+                "evaluates monomials from downward closed level tables, and a "
+                "selected index set is not downward closed, so rebuilding the "
+                "closure would restore the terms the selection removed. Refit "
+                "with basis_kind='legendre' or 'chebyshev', which are "
+                "evaluated from their multi-indices."
+            )
+        mi = np.asarray(emulator.multi_indices, dtype=np.int64)
+        plan_cls: Any = BASIS_PLANS[family]
+        plan = plan_cls.build(mi)
+        # SparseEmu maps its training box onto [-1, 1] as
+        # 2 (X - lo) / span - 1, which is (X - mean) / scale with these two.
+        span = np.asarray(emulator.span_, dtype=np.float64)
+        input_scale = 0.5 * span
+        input_mean = np.asarray(emulator.lo_, dtype=np.float64) + input_scale
+        coeffs = fold_output_affine(
+            np.asarray(emulator.coefficients, dtype=np.float64), mi,
+            np.asarray(emulator.mean_Y_, dtype=np.float64),
+            np.asarray(emulator.scale_Y_, dtype=np.float64),
+        )
+        empty = np.zeros(0, dtype=np.int64)
+        n_out = int(coeffs.shape[1])
+        return cls(
+            coeffs=jnp.asarray(coeffs, dtype=dtype),
+            input_mean=jnp.asarray(input_mean, dtype=dtype),
+            input_scale=jnp.asarray(input_scale, dtype=dtype),
+            box_lo=jnp.asarray(emulator.lo_, dtype=dtype),
+            box_hi=jnp.asarray(emulator.hi_, dtype=dtype),
+            closure_parent=jnp.asarray(empty, dtype=jnp.int32),
+            closure_var=jnp.asarray(empty, dtype=jnp.int32),
+            level_rows=jnp.asarray(empty, dtype=jnp.int32),
+            select=jnp.asarray(empty, dtype=jnp.int32),
+            multi_indices=jnp.asarray(mi, dtype=jnp.int32),
+            n_params=int(mi.shape[1]),
+            n_outputs=n_out,
+            dmax=int(plan.max_degree),
+            level_sizes=(),
+            basis_family=family,
+            table_degree=int(mi.max()) if mi.size else 0,
+            input_codes=tuple(0 for _ in range(int(mi.shape[1]))),
+            output_codes=tuple(0 for _ in range(n_out)),
+            direction="forward",
+            dtype=dtype,
+        )
+
+    @classmethod
     def from_polyemu(cls, emulator, *, direction="forward", dtype=None):
+        if hasattr(emulator, "candidate_indices") and not hasattr(
+            emulator, "forward_multi_indices"
+        ):
+            # A SparseEmu. Callers reach for the name they know, so dispatch
+            # rather than fail on the first PolyEmu attribute that is missing.
+            if direction != "forward":
+                raise ValueError(
+                    "a sparse fit has no backward map; pass direction='forward'"
+                )
+            return cls.from_sparse(emulator, dtype=dtype)
         if direction not in ("forward", "backward"):
             raise ValueError(f"direction must be forward or backward, got {direction!r}")
-        if dtype is None:
-            dtype = jnp.float64
-        if dtype == jnp.float64 and not jax.config.jax_enable_x64:
-            raise ValueError(
-                "the JAX backend needs jax.config.update('jax_enable_x64', True) for "
-                "float64; enable x64 or pass dtype=jnp.float32 explicitly."
-            )
+        dtype = _resolve_dtype(dtype)
         from MomentEmu.emulator import _transform_codes
 
         transform = getattr(emulator, "transform", None)

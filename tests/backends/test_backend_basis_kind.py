@@ -11,9 +11,11 @@ did not raise: it returned the wrong numbers, 4.8e-01 and 3.7e-01 relative on
 a degree-5 fit. ``symbolic_momentemu`` already raised ``NotImplementedError``
 naming the basis, which is the behaviour the other two are held to here.
 
-The gap matters because the package tells users to reach for these bases:
-``core.py`` advises "a lower degree, more samples, or an orthonormal basis"
-when cond(M) is high, and taking that advice must not cost the backends.
+The gap matters because the package tells users to reach for these bases: the
+cond(M) warning names ``basis_kind`` as a way to recover digits, and taking
+that advice must not cost the backends. (T-009 later rewrote that warning to
+say the advice is about coefficients, not predictions; the backends still
+have to support the choice.)
 """
 
 from __future__ import annotations

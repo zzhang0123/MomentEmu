@@ -671,9 +671,14 @@ def check_conditioning(
         warnings.warn(
             f"{tag}cond(M) = {rep.cond:.2e} exceeds {warn_at:.0e}: the solve keeps about "
             f"{rep.digits_left:.1f} of {FLOAT64_DIGITS:.1f} float64 digits in the "
-            f"coefficients. Predictions are usually unaffected, but exported "
-            f"coefficients and symbolic expressions are not trustworthy beyond that "
-            f"many digits. Consider a lower degree, more samples, or an orthonormal basis.",
+            f"coefficients. This is about the COEFFICIENTS: exported coefficients, "
+            f"symbolic expressions and derivatives read off them are untrustworthy "
+            f"beyond that many digits, while fresh-point predictions are usually "
+            f"unaffected below cond(M) ~ 1e16. If you need the coefficients, recover "
+            f"digits with a lower degree, more samples, or a basis_kind matched to "
+            f"where the design puts its samples. If you need only predictions, "
+            f"measure before changing the basis: a family whose weight sits where "
+            f"the design has none can cost accuracy.",
             IllConditionedWarning,
             stacklevel=2,
         )

@@ -56,12 +56,46 @@ def _jacobian_block(J: Any, n_rows: int, n: int, m: int) -> np.ndarray:
     return J
 
 
+def _output_scaling(Y: np.ndarray, output_scaling: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(Ys, scale_Y)``: the outputs on a common footing, and by what.
+
+    ``scale_Y`` is one divisor per output even under "global", where every
+    entry is the same scalar, so the chain rule in
+    :func:`_covariance_from_jacobian` reads the same in both cases.
+    """
+    if output_scaling == "per_output":
+        Ys, _mean, scale_Y = _standardise(Y)
+        return Ys, scale_Y
+    Ys = Y - Y.mean(axis=0)
+    span = float(np.sqrt(np.mean(Ys ** 2)))
+    span = span if span > 0.0 else 1.0
+    # One scalar for every output, so relative importance is preserved.
+    return Ys / span, np.full(Y.shape[1], span)
+
+
+def _symmetrised(C: Any, n: int, name: str) -> np.ndarray:
+    """Validate an ``(n, n)`` covariance and return its symmetric part."""
+    C = as_float64(np.asarray(C), name)
+    check_finite(C, name)
+    if C.shape != (n, n):
+        raise ValueError(f"{name} must be ({n}, {n}), got shape {C.shape}")
+    return 0.5 * (C + C.T)                   # eigh reads the lower triangle only
+
+
+def _eigendecomposition(C: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Eigenvalues descending and clipped at zero, with matching eigenvectors."""
+    evals, V = np.linalg.eigh(C)
+    order = np.argsort(evals)[::-1]
+    return np.maximum(evals[order], 0.0), V[:, order]
+
+
 def _covariance_from_jacobian(
     jacobian: Any,
     X: np.ndarray,
     scale_X: np.ndarray,
     scale_Y: np.ndarray,
     batch_size: int,
+    jacobian_inputs: np.ndarray | None = None,
 ) -> np.ndarray:
     """Accumulate ``C = E[J^T J]`` from a supplied Jacobian, in the coordinates
     this module works in.
@@ -78,9 +112,20 @@ def _covariance_from_jacobian(
 
     A callable is handed RAW X, one batch at a time, so a large design never
     needs its whole Jacobian in memory at once.
+
+    ``jacobian_inputs`` is what the callable is evaluated at when that is not
+    ``X`` itself. ``X`` then supplies only the row count, while ``scale_X``
+    still comes from the coordinates the rotation is computed in. The case is
+    a rotation that follows a warp: the caller differentiates at the raw
+    points, and the result belongs to the warped axes.
     """
     N, n = X.shape
     m = scale_Y.shape[0]
+    at = X if jacobian_inputs is None else jacobian_inputs
+    if at.shape[0] != N:
+        raise ValueError(
+            f"jacobian_inputs has {at.shape[0]} rows, expected {N} (one per sample)"
+        )
     is_callable = callable(jacobian)
     if not is_callable:
         jacobian = _jacobian_block(jacobian, N, n, m)
@@ -88,7 +133,7 @@ def _covariance_from_jacobian(
     step = max(int(batch_size), 1)
     for start in range(0, N, step):
         stop = min(start + step, N)
-        chunk = X[start:stop]
+        chunk = at[start:stop]
         if is_callable:
             J = _jacobian_block(jacobian(chunk), chunk.shape[0], n, m)
         else:
@@ -96,6 +141,93 @@ def _covariance_from_jacobian(
         Js = J * scale_X[None, None, :] / scale_Y[None, :, None]
         C += np.einsum("kmi,kmj->ij", Js, Js)
     return C / float(N)
+
+
+def gradient_covariance_matrix(
+    X: Any,
+    Y: Any,
+    pilot_degree: int = 3,
+    batch_size: int = 2048,
+    output_scaling: str = "global",
+    jacobian: Any = None,
+    jacobian_inputs: Any = None,
+    **pilot_kwargs: Any,
+) -> np.ndarray:
+    """``C = E[J^T J]`` in standardised coordinates, symmetrised.
+
+    This is the matrix :func:`active_subspace` diagonalises. It is exposed on
+    its own because one C serves many rotations of the same data, and
+    rebuilding it is not cheap: :func:`scan_rank` fits an emulator per rank,
+    and recomputing C for each one re-fits the pilot -- or, with ``jacobian``,
+    calls back into the caller's model -- for a matrix that cannot change
+    between ranks.
+
+    ``jacobian_inputs`` is where a callable ``jacobian`` is evaluated, when
+    that is not ``X``. It exists for a rotation that FOLLOWS a warp: the
+    rotation is computed in the warped coordinates, so ``X`` and the scales
+    taken from it are warped, while the caller differentiates at the raw
+    points. The callable is then responsible for returning ``dY/dX`` in the
+    coordinates of ``X``; :meth:`MomentEmu.warp.Warp.derivative` supplies the
+    factor and :class:`MomentEmu.precondition._Rotate` composes the two.
+
+    Args:
+        jacobian: as in :func:`active_subspace`.
+        jacobian_inputs: ``(N, n)`` points at which to call ``jacobian``,
+            defaulting to ``X``.
+
+    Returns:
+        (n, n) symmetric C in standardised coordinates.
+    """
+    X = as_float64(np.asarray(X), "X")
+    Y = as_float64(np.asarray(Y), "Y")
+    check_finite(X, "X")
+    check_finite(Y, "Y")
+    if Y.ndim == 1:
+        Y = Y.reshape(-1, 1)
+    if output_scaling not in ("global", "per_output"):
+        raise ValueError(
+            f"output_scaling must be 'global' or 'per_output', got "
+            f"{output_scaling!r}"
+        )
+    if jacobian_inputs is not None and jacobian is None:
+        raise ValueError(
+            "jacobian_inputs says where to evaluate a jacobian, so it has no "
+            "meaning without jacobian="
+        )
+    n = X.shape[1]
+    Xs, _mean, scale_X = _standardise(X)
+    Ys, scale_Y = _output_scaling(Y, output_scaling)
+
+    if jacobian is not None:
+        at = (
+            None if jacobian_inputs is None
+            else as_float64(np.asarray(jacobian_inputs), "jacobian_inputs")
+        )
+        C = _covariance_from_jacobian(
+            jacobian, X, scale_X, scale_Y, batch_size, at
+        )
+        return _symmetrised(C, n, "gradient covariance")
+
+    pilot_kwargs.setdefault("forward", True)
+    pilot_kwargs.setdefault("backward", False)
+    pilot_kwargs.setdefault("RMSE_tol", 0.0)
+    pilot_kwargs.setdefault("verbose", 0)
+    pilot = PolyEmu(
+        Xs, Ys,
+        init_deg_forward=int(pilot_degree),
+        max_degree_forward=int(pilot_degree),
+        **pilot_kwargs,
+    )
+
+    C = np.zeros((n, n))
+    # Batched: the Jacobian is (N, m, n) and m is the number of outputs, which
+    # is a full spectrum in the case this was built for.
+    for start in range(0, Xs.shape[0], batch_size):
+        chunk = Xs[start:start + batch_size]
+        J = np.atleast_3d(pilot.jacobian(chunk))
+        C += np.einsum("kmi,kmj->ij", J, J)
+    C /= Xs.shape[0]
+    return _symmetrised(C, n, "gradient covariance")
 
 
 def active_subspace(
@@ -165,63 +297,15 @@ def active_subspace(
             "pass jacobian or gradient_covariance, not both; they are two ways "
             "to supply the same C = E[J^T J]"
         )
-    Xs, _, scale_X = _standardise(X)
-    if output_scaling == "per_output":
-        Ys, _, scale_Y = _standardise(Y)
-    else:
-        Ys = Y - Y.mean(axis=0)
-        span = float(np.sqrt(np.mean(Ys ** 2)))
-        span = span if span > 0.0 else 1.0
-        Ys = Ys / span
-        # One scalar for every output, so relative importance is preserved.
-        scale_Y = np.full(Y.shape[1], span)
-
+    n = X.shape[1]
     if gradient_covariance is not None:
-        C = as_float64(np.asarray(gradient_covariance), "gradient_covariance")
-        check_finite(C, "gradient_covariance")
-        n = Xs.shape[1]
-        if C.shape != (n, n):
-            raise ValueError(
-                f"gradient_covariance must be ({n}, {n}), got shape {C.shape}"
-            )
-        C = 0.5 * (C + C.T)
-        evals, V = np.linalg.eigh(C)
-        order = np.argsort(evals)[::-1]
-        return np.maximum(evals[order], 0.0), V[:, order]
-
-    if jacobian is not None:
-        C = _covariance_from_jacobian(
-            jacobian, X, scale_X, scale_Y, batch_size
+        C = _symmetrised(gradient_covariance, n, "gradient_covariance")
+    else:
+        C = gradient_covariance_matrix(
+            X, Y, pilot_degree=pilot_degree, batch_size=batch_size,
+            output_scaling=output_scaling, jacobian=jacobian, **pilot_kwargs,
         )
-        C = 0.5 * (C + C.T)
-        evals, V = np.linalg.eigh(C)
-        order = np.argsort(evals)[::-1]
-        return np.maximum(evals[order], 0.0), V[:, order]
-
-    pilot_kwargs.setdefault("forward", True)
-    pilot_kwargs.setdefault("backward", False)
-    pilot_kwargs.setdefault("RMSE_tol", 0.0)
-    pilot_kwargs.setdefault("verbose", 0)
-    pilot = PolyEmu(
-        Xs, Ys,
-        init_deg_forward=int(pilot_degree),
-        max_degree_forward=int(pilot_degree),
-        **pilot_kwargs,
-    )
-
-    n = Xs.shape[1]
-    C = np.zeros((n, n))
-    # Batched: the Jacobian is (N, m, n) and m is the number of outputs, which
-    # is a full spectrum in the case this was built for.
-    for start in range(0, Xs.shape[0], batch_size):
-        chunk = Xs[start:start + batch_size]
-        J = np.atleast_3d(pilot.jacobian(chunk))
-        C += np.einsum("kmi,kmj->ij", J, J)
-    C /= Xs.shape[0]
-    C = 0.5 * (C + C.T)                      # eigh reads the lower triangle only
-    evals, V = np.linalg.eigh(C)
-    order = np.argsort(evals)[::-1]
-    return np.maximum(evals[order], 0.0), V[:, order]
+    return _eigendecomposition(C)
 
 
 def select_rank(
@@ -363,6 +447,10 @@ def scan_rank(
     X_test: Any = None,
     Y_test: Any = None,
     pilot_degree: int = 3,
+    output_scaling: str = "global",
+    pilot_kwargs: dict | None = None,
+    jacobian: Any = None,
+    gradient_covariance: Any = None,
     **kwargs: Any,
 ) -> list[dict]:
     """Fit several (rank, degree) pairs and report accuracy against budget.
@@ -373,16 +461,30 @@ def scan_rank(
     saturates at its own error floor no matter the degree, and a rank one too
     high is beaten by a smaller rank at a higher degree for the same budget.
 
+    The rotation itself does not depend on the rank, so the gradient
+    covariance is built once and every fit reads the same one. Rebuilding it
+    per rank re-fits the pilot as many times as there are ranks, and with
+    ``jacobian`` it is worse than redundant: each rebuild is another pass
+    through the caller's model.
+
     Args:
         ranks: ranks to try.
         degree: one degree for every rank, or one per rank.
         X_test, Y_test: held-out set; without it the training set is scored and
             the numbers are optimistic.
+        jacobian, gradient_covariance: as in :func:`active_subspace`. Either
+            replaces the pilot for every rank in the scan.
+        output_scaling, pilot_kwargs: how the shared covariance is built.
 
     Returns:
         One dict per fit with rank, degree, n_terms, variance_share and fom
         (rms error over the rms of the reference), sorted by n_terms.
     """
+    if jacobian is not None and gradient_covariance is not None:
+        raise ValueError(
+            "pass jacobian or gradient_covariance, not both; they are two ways "
+            "to supply the same C = E[J^T J]"
+        )
     ranks = [int(r) for r in ranks]
     degrees = [int(degree)] * len(ranks) if np.ndim(degree) == 0 else [int(v) for v in degree]
     if len(degrees) != len(ranks):
@@ -396,11 +498,19 @@ def scan_rank(
         Ys = Ys.reshape(-1, 1)
     den = float(np.sqrt(np.mean(Ys ** 2))) or 1.0
 
+    C = (
+        gradient_covariance_matrix(
+            X, Y, pilot_degree=pilot_degree, output_scaling=output_scaling,
+            jacobian=jacobian, **(pilot_kwargs or {}),
+        )
+        if gradient_covariance is None else gradient_covariance
+    )
+
     rows = []
     for r, d in zip(ranks, degrees):
         try:
             emu = ActiveSubspaceEmu(
-                X, Y, rank=r, pilot_degree=pilot_degree,
+                X, Y, rank=r, gradient_covariance=C,
                 init_deg_forward=d, max_degree_forward=d, **kwargs
             )
             pred = emu.forward_emulator(Xs, extrapolation="ignore")

@@ -241,3 +241,46 @@ def test_unknown_estimator_is_rejected(rotated):
     with pytest.raises(ValueError, match="estimator must be"):
         PreconditionedEmu(X[:1500], Y[:1500], order="none", estimator="magic",
                           max_degree_forward=3, verbose=0)
+
+
+def test_orders_are_scored_with_the_chosen_estimator(rotated):
+    """A dense polynomial proxy ranks the coordinates, not the model. The two
+    need not agree, so the scan uses the estimator that will be used."""
+    from MomentEmu.basis import Basis
+
+    X, Y, _, _ = rotated
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        poly = PreconditionedEmu(X, Y, rank=2, random_state=0,
+                                 RMSE_tol=0.0, verbose=0)
+        sparse = PreconditionedEmu(X, Y, rank=2, random_state=0,
+                                   estimator="sparse",
+                                   candidate=Basis(degree=16, max_interaction=2),
+                                   degree=16, n_terms=60)
+    assert set(poly.scores) == set(sparse.scores)
+    differing = [k for k in poly.scores
+                 if abs(poly.scores[k] - sparse.scores[k]) > 1e-6 * max(
+                     poly.scores[k], 1e-12)]
+    assert differing, "the sparse scan reproduced the polynomial scores exactly"
+    # and the sparse model is genuinely the one that was scored
+    assert sparse.report()["estimator"] == "sparse"
+
+
+def test_factored_leaves_rotation_orders_out_of_the_scan():
+    """Rotation orders are not candidates for a factored model rather than
+    errors to hit part-way through the scan."""
+    rng = np.random.default_rng(4)
+    X = rng.uniform(-1, 1, (5000, 6))
+    blocks = ((0, 1, 2), (3, 4, 5))
+    Y = ((1.2 + np.sin(0.9 * X[:, 0] + 0.7 * X[:, 1] + 0.5 * X[:, 2]))
+         * (1.6 + 0.5 * np.exp(0.4 * (X[:, 3] + 0.8 * X[:, 4] + 0.6 * X[:, 5])))
+         ).reshape(-1, 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        emu = PreconditionedEmu(X, Y, estimator="factored", blocks=blocks,
+                                rank=1, degree=5, random_state=0)
+    assert set(emu.scores) == {"none", "warp"}
+    assert emu.order in ("none", "warp")
+    pred = emu.forward_emulator(X[:400])
+    err = float(np.sqrt(np.mean((pred - Y[:400]) ** 2)) / np.sqrt(np.mean(Y ** 2)))
+    assert err < 1e-2, err

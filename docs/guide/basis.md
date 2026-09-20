@@ -376,7 +376,8 @@ emu = PreconditionedEmu(X, Y, order="rotate", rank=2, estimator="sparse",
 Each order is scored at the highest degree *it* can afford, not at one degree
 shared by all: comparing a two-dimensional fit and a seven-dimensional one at a
 degree the seven-dimensional one can reach would hide the benefit rotation
-exists for.
+exists for. Orders are also scored with the estimator that will actually be
+used, since a dense proxy ranks the coordinates rather than the model.
 
 `select="accuracy"` takes the lowest error. `select="parsimony"` takes the
 smallest model within a tolerance of it, which is usually the useful choice:

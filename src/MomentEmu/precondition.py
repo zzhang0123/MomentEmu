@@ -106,12 +106,21 @@ class PreconditionedEmu:
             Remaining keywords go to the estimator, so they are the
             estimator's, not a uniform set: ``extrapolation=`` on a prediction
             reaches PolyEmu and is rejected by the other two.
-        scan_degree: ceiling on the degree used when comparing orders. Each
-            candidate is scored at the highest degree IT can afford, not at one
-            degree shared by all: an order that cuts seven dimensions to two
-            can afford a far higher degree, and scoring every order at a degree
-            the full-dimensional ones can reach would hide exactly the benefit
-            rotation exists for.
+        scan_degree: ceiling on the degree used when comparing orders under
+            the polynomial estimator. Each candidate is scored at the highest
+            degree IT can afford, not at one degree shared by all: an order
+            that cuts seven dimensions to two can afford a far higher degree,
+            and scoring every order at a degree the full-dimensional ones can
+            reach would hide exactly the benefit rotation exists for.
+        scan_terms: active-set size used when scoring orders under the sparse
+            estimator, capped at the caller's own ``n_terms``.
+
+            Orders are scored with the estimator that will actually be used.
+            Scoring a sparse or factored model with a dense polynomial proxy
+            ranks the coordinates rather than the model, and the two need not
+            agree: a rotation that helps a dense fit by cutting the dimension
+            helps a sparse one less, because sparse selection was already
+            paying only for the terms it kept.
 
     Attributes:
         order: the order actually used.
@@ -130,11 +139,12 @@ class PreconditionedEmu:
         warp_kwargs: dict | None = None,
         scan_degree: int = 12,
         estimator: str = "polynomial",
+        scan_terms: int = 60,
         select: str = "accuracy",
         parsimony_tol: float = 2.0,
         validation_split: float = 0.2,
         random_state: Any = None,
-        candidates: Any = ("none", "warp", "rotate", "rotate_warp", "warp_rotate"),
+        candidates: Any = None,
         **kwargs: Any,
     ) -> None:
         X = as_float64(np.asarray(X), "X")
@@ -148,6 +158,13 @@ class PreconditionedEmu:
                 f"estimator must be one of {ESTIMATORS}, got {estimator!r}"
             )
         self.estimator = str(estimator)
+        if candidates is None:
+            # A rotation replaces the parameters by linear combinations, so a
+            # factored model's blocks would no longer refer to anything. Those
+            # orders are not candidates for it rather than errors to hit.
+            candidates = (
+                ("none", "warp") if self.estimator == "factored" else ORDERS
+            )
         wk = dict(warp_kwargs or {})
         wk.setdefault("random_state", random_state)
 
@@ -179,7 +196,8 @@ class PreconditionedEmu:
             for name in candidates:
                 steps = build(name)
                 A = _chain(steps, X)
-                err, deg = _score(A, Y, keep, hold, scan_degree)
+                err, deg = _score(A, Y, keep, hold, scan_degree,
+                                  self.estimator, kwargs, scan_terms)
                 built[name], dims[name] = steps, int(A.shape[1])
                 self.scores[name] = err
                 self.scan_degrees[name] = deg
@@ -289,14 +307,41 @@ def _affordable_degree(n_dims, n_rows, ceiling, oversample=3, cap_terms=6000):
     return degree
 
 
-def _score(A, Y, keep, hold, ceiling):
-    """Held-out error at the highest degree these coordinates can afford.
+def _score(A, Y, keep, hold, ceiling, estimator="polynomial",
+           estimator_kwargs=None, scan_terms=60):
+    """Held-out error of the ESTIMATOR THAT WILL BE USED on these coordinates.
 
-    Each candidate order gets its own degree. Scoring them all at one degree
-    would compare a two-dimensional fit and a seven-dimensional one at a degree
-    the latter can reach, which is precisely the comparison rotation is meant
-    to escape.
+    For the polynomial estimator each candidate order gets its own degree:
+    scoring them all at one degree would compare a two-dimensional fit and a
+    seven-dimensional one at a degree the latter can reach, which is precisely
+    the comparison rotation is meant to escape. The sparse and factored
+    estimators are scored as themselves, because a dense proxy ranks the
+    coordinates rather than the model.
     """
+    kw = dict(estimator_kwargs or {})
+    if estimator == "sparse":
+        from MomentEmu.sparse import SparseEmu
+
+        kw.pop("n_terms", None)
+        n_terms = min(int(scan_terms), max(1, keep.size // 4))
+        try:
+            pred = SparseEmu(
+                A[keep], Y[keep], n_terms=n_terms, **kw
+            ).forward_emulator(A[hold])
+        except Exception:                                  # noqa: BLE001
+            return float("inf"), 0
+        return float(np.sqrt(np.mean((pred - Y[hold]) ** 2))), n_terms
+    if estimator == "factored":
+        from MomentEmu.factored import FactoredEmu
+
+        kw = {k: v for k, v in kw.items() if k not in ("n_sweeps", "n_restarts")}
+        try:
+            pred = FactoredEmu(
+                A[keep], Y[keep], n_sweeps=40, n_restarts=2, **kw
+            ).forward_emulator(A[hold])
+        except Exception:                                  # noqa: BLE001
+            return float("inf"), 0
+        return float(np.sqrt(np.mean((pred - Y[hold]) ** 2))), int(kw.get("rank", 1))
     n = A.shape[1]
     degree = _affordable_degree(n, keep.size, ceiling)
     plan = MonomialPlan.build(generate_multi_indices(n, degree))

@@ -95,6 +95,15 @@ All notable changes to MomentEmu are documented here. The format follows
 
 ### Fixed
 
+- `PreconditionedEmu` scored candidate orders with a dense polynomial fit
+  whatever estimator was going to be used, which ranks the coordinates rather
+  than the model. The two need not agree: a rotation that helps a dense fit by
+  cutting the dimension helps a sparse one less, because sparse selection was
+  already paying only for the terms it kept. Orders are now scored with the
+  estimator that will be used, and `scan_terms` sizes the sparse one. With
+  `estimator="factored"` the rotation orders are left out of the candidate set
+  rather than raising part-way through the scan.
+
 - `FactoredEmu` centred its outputs, which cost exactly one rank. Subtracting
   the mean turns `prod_k f_k` into `prod_k f_k - c`, and that is not a product:
   on an exactly rank-one target, rank 1 reached only 7.0e-2 while rank 2

@@ -72,6 +72,9 @@ class MonomialPlan:
     parent: np.ndarray
     var: np.ndarray
     levels: list
+
+    # Not annotated, so it is a class attribute and not a dataclass field.
+    family = "monomial"
     select: np.ndarray
     deriv_parent: np.ndarray
 
@@ -310,6 +313,8 @@ class ChebyshevPlan(_TensorPlan):
     for an edge-clustered design and the wrong one for a bell-shaped one.
     """
 
+    family = "chebyshev"
+
     @staticmethod
     def _one_dimensional(z: np.ndarray, dmax: int) -> tuple[np.ndarray, np.ndarray]:
         t = np.empty((z.size, dmax + 1))
@@ -336,6 +341,8 @@ class LegendrePlan(_TensorPlan):
     on [-1, 1], so this is the family matched to a design that fills its box
     evenly, which is what a Latin hypercube or a uniform box produces.
     """
+
+    family = "legendre"
 
     @staticmethod
     def _one_dimensional(z: np.ndarray, dmax: int) -> tuple[np.ndarray, np.ndarray]:

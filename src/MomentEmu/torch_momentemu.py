@@ -35,7 +35,19 @@ class TorchMomentEmu(nn.Module):
         self.n_params = int(trained_emulator.n_params)
         self.n_outputs = int(trained_emulator.n_outputs)
         self.multi_indices = np.asarray(trained_emulator.forward_multi_indices)
-        self._plan = MonomialPlan.build(self.multi_indices)
+        # T-007: this used to be MonomialPlan.build() whatever the fit used, so
+        # a Legendre or Chebyshev emulator was evaluated in the WRONG basis and
+        # answered without raising: 4.8e-01 and 3.7e-01 relative on a degree-5
+        # fit. Take the plan the emulator was actually fitted with.
+        fitted_plan = getattr(trained_emulator, "forward_plan", None)
+        self._plan = (
+            fitted_plan if fitted_plan is not None
+            else MonomialPlan.build(self.multi_indices)
+        )
+        self.basis_family = str(getattr(self._plan, "family", "monomial"))
+        self.table_degree = (
+            int(self.multi_indices.max()) if self.multi_indices.size else 0
+        )
         self.register_buffer(
             "coeffs",
             torch.tensor(trained_emulator.forward_coeffs, dtype=dtype),
@@ -56,6 +68,49 @@ class TorchMomentEmu(nn.Module):
                 dtype=dtype,
             ),
         )
+
+    def evaluate_basis(self, X_scaled: torch.Tensor) -> torch.Tensor:
+        """(N, D) design in the basis the emulator was fitted with."""
+        if self.basis_family == "monomial":
+            return self.evaluate_monomials(X_scaled)
+        return self.evaluate_tensor_basis(X_scaled)
+
+    def evaluate_tensor_basis(self, X_scaled: torch.Tensor) -> torch.Tensor:
+        """(N, D) tensor-product design, ``prod_i p_{alpha_i}(z_i)``.
+
+        Mirrors ``monomials._TensorPlan.evaluate``, clip included: outside the
+        training box the basis saturates rather than diverging, and the
+        caller's extrapolation guard still reports the excursion.
+        """
+        z_all = torch.clamp(X_scaled, -1.0, 1.0)
+        idx = torch.as_tensor(
+            self.multi_indices, dtype=torch.long, device=X_scaled.device
+        )
+        out = torch.ones(
+            X_scaled.shape[0], self.multi_indices.shape[0],
+            dtype=X_scaled.dtype, device=X_scaled.device,
+        )
+        for i in range(self.n_params):
+            z = z_all[:, i]
+            columns = [torch.ones_like(z)]
+            if self.table_degree >= 1:
+                columns.append(z)
+            for k in range(1, self.table_degree):
+                if self.basis_family == "legendre":
+                    # (k+1) P_{k+1} = (2k+1) z P_k - k P_{k-1}
+                    nxt = ((2 * k + 1) * z * columns[k] - k * columns[k - 1]) / (k + 1)
+                else:
+                    # T_{k+1} = 2 z T_k - T_{k-1}
+                    nxt = 2.0 * z * columns[k] - columns[k - 1]
+                columns.append(nxt)
+            table = torch.stack(columns, dim=1)
+            if self.basis_family == "legendre":
+                degrees = torch.arange(
+                    self.table_degree + 1, dtype=table.dtype, device=table.device
+                )
+                table = table * torch.sqrt(2.0 * degrees + 1.0)
+            out = out * table[:, idx[:, i]]
+        return out
 
     def evaluate_monomials(self, X_scaled: torch.Tensor) -> torch.Tensor:
         """Functional (N, D) monomial build from the P0.7 plan.
@@ -95,7 +150,7 @@ class TorchMomentEmu(nn.Module):
             )
         X = X.to(self.dtype)
         X_scaled = (X - self.input_mean) / self.input_scale
-        Phi = self.evaluate_monomials(X_scaled)
+        Phi = self.evaluate_basis(X_scaled)
         Y = Phi @ self.coeffs * self.output_scale + self.output_mean
         if any(self.transform_codes):
             Y = self._apply_inverse(Y)

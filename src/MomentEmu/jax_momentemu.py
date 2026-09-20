@@ -1,4 +1,4 @@
-"""JAX backend on the shared monomial plan (P2.1, D2).
+"""JAX backend on the shared basis plans (P2.1, D2; T-007 for the tensor path).
 
 A fitted PolyEmu converts to a frozen dataclass registered with
 ``jax.tree_util.register_dataclass``.  The array leaves are the folded
@@ -37,6 +37,47 @@ _JITTED_JACFWD = jax.jit(jax.jacfwd(_evaluate_impl, argnums=1))
 _JITTED_HESSIAN = jax.jit(jax.hessian(_value_impl, argnums=1))
 
 
+def _one_dimensional_table(z, family, table_degree):
+    """``(N, table_degree + 1)`` values of the 1-D family at ``z``.
+
+    Mirrors ``monomials.LegendrePlan._one_dimensional`` and
+    ``ChebyshevPlan._one_dimensional``; the tests pin the two against each
+    other through the numpy fit, because a silent divergence here returns
+    plausible numbers from the wrong basis.
+    """
+    columns = [jnp.ones_like(z)]
+    if table_degree >= 1:
+        columns.append(z)
+    for k in range(1, table_degree):
+        if family == "legendre":
+            # (k+1) P_{k+1} = (2k+1) z P_k - k P_{k-1}
+            nxt = ((2 * k + 1) * z * columns[k] - k * columns[k - 1]) / (k + 1)
+        else:
+            # T_{k+1} = 2 z T_k - T_{k-1}
+            nxt = 2.0 * z * columns[k] - columns[k - 1]
+        columns.append(nxt)
+    table = jnp.stack(columns, axis=1)
+    if family == "legendre":
+        degrees = jnp.arange(table_degree + 1, dtype=table.dtype)
+        table = table * jnp.sqrt(2.0 * degrees + 1.0)
+    return table
+
+
+def _tensor_design(Xs, multi_indices, family, table_degree, n_params):
+    """``(N, D)`` design for a tensor-product basis, ``prod_i p_{alpha_i}(z_i)``.
+
+    The argument is clipped to [-1, 1] exactly as ``_TensorPlan`` does, so the
+    basis saturates outside the training box rather than diverging. The
+    caller's extrapolation guard still reports the excursion.
+    """
+    Z = jnp.clip(Xs, -1.0, 1.0)
+    out = jnp.ones((Z.shape[0], multi_indices.shape[0]), dtype=Xs.dtype)
+    for i in range(n_params):
+        table = _one_dimensional_table(Z[:, i], family, table_degree)
+        out = out * jnp.take(table, multi_indices[:, i], axis=1)
+    return out
+
+
 @dataclass(frozen=True)
 class JaxEmulator:
     """JAX pytree emulator for a fitted forward or backward PolyEmu."""
@@ -50,10 +91,13 @@ class JaxEmulator:
     closure_var: object
     level_rows: object
     select: object
+    multi_indices: object
     n_params: int
     n_outputs: int
     dmax: int
     level_sizes: tuple
+    basis_family: str
+    table_degree: int
     input_codes: tuple
     output_codes: tuple
     direction: str
@@ -88,18 +132,24 @@ class JaxEmulator:
         if any(self.input_codes):
             X = self._apply_forward(X, self.input_codes)
         Xs = (X - self.input_mean) / self.input_scale
-        N = Xs.shape[0]
-        Dc = self.closure_parent.shape[0]
-        buf = jnp.ones((Dc, N), dtype=self.dtype)
-        xT = Xs.T
-        offset = 0
-        for size in self.level_sizes:
-            rows = self.level_rows[offset:offset + size]
-            parent = buf[self.closure_parent[rows]]
-            var = xT[self.closure_var[rows]]
-            buf = buf.at[rows].set(parent * var)
-            offset += size
-        Phi = buf[self.select].T
+        # basis_family is static metadata, so this branch is resolved at trace
+        # time and the unused path never reaches the graph.
+        if self.basis_family == "monomial":
+            N = Xs.shape[0]
+            Dc = self.closure_parent.shape[0]
+            buf = jnp.ones((Dc, N), dtype=self.dtype)
+            xT = Xs.T
+            offset = 0
+            for size in self.level_sizes:
+                rows = self.level_rows[offset:offset + size]
+                parent = buf[self.closure_parent[rows]]
+                var = xT[self.closure_var[rows]]
+                buf = buf.at[rows].set(parent * var)
+                offset += size
+            Phi = buf[self.select].T
+        else:
+            Phi = _tensor_design(Xs, self.multi_indices, self.basis_family,
+                                 self.table_degree, self.n_params)
         Y = Phi @ self.coeffs
         if any(self.output_codes):
             Y = self._apply_inverse(Y, self.output_codes)
@@ -193,23 +243,42 @@ class JaxEmulator:
             input_codes = codes
             output_codes = linear
             in_dim, out_dim = int(emulator.n_outputs), int(emulator.n_params)
-        levels = plan.levels
-        level_sizes = tuple(int(a.shape[0]) for a in levels)
-        level_rows = np.concatenate(levels) if levels else np.zeros(0, dtype=np.int64)
+        family = getattr(plan, "family", "monomial")
+        empty = np.zeros(0, dtype=np.int64)
+        if family == "monomial":
+            levels = plan.levels
+            level_sizes = tuple(int(a.shape[0]) for a in levels)
+            level_rows = np.concatenate(levels) if levels else empty
+            closure_parent, closure_var, select = plan.parent, plan.var, plan.select
+            multi_indices = np.zeros((0, 0), dtype=np.int64)
+            table_degree = 0
+        else:
+            # A tensor-product basis is evaluated from its multi-indices and
+            # the family's own recurrence; the monomial closure tables have no
+            # meaning for it, so they are left empty rather than rebuilt from
+            # the same indices, which would silently evaluate a DIFFERENT
+            # basis (T-007: the Torch backend did exactly that).
+            level_sizes, level_rows = (), empty
+            closure_parent = closure_var = select = empty
+            multi_indices = np.asarray(plan.multi_indices, dtype=np.int64)
+            table_degree = int(multi_indices.max()) if multi_indices.size else 0
         return cls(
             coeffs=jnp.asarray(coeffs, dtype=dtype),
             input_mean=jnp.asarray(input_mean, dtype=dtype),
             input_scale=jnp.asarray(input_scale, dtype=dtype),
             box_lo=jnp.asarray(box.lo, dtype=dtype),
             box_hi=jnp.asarray(box.hi, dtype=dtype),
-            closure_parent=jnp.asarray(plan.parent, dtype=jnp.int32),
-            closure_var=jnp.asarray(plan.var, dtype=jnp.int32),
+            closure_parent=jnp.asarray(closure_parent, dtype=jnp.int32),
+            closure_var=jnp.asarray(closure_var, dtype=jnp.int32),
             level_rows=jnp.asarray(level_rows, dtype=jnp.int32),
-            select=jnp.asarray(plan.select, dtype=jnp.int32),
+            select=jnp.asarray(select, dtype=jnp.int32),
+            multi_indices=jnp.asarray(multi_indices, dtype=jnp.int32),
             n_params=in_dim,
             n_outputs=out_dim,
             dmax=int(plan.max_degree),
             level_sizes=level_sizes,
+            basis_family=str(family),
+            table_degree=table_degree,
             input_codes=input_codes,
             output_codes=output_codes,
             direction=direction,
@@ -229,12 +298,15 @@ jax.tree_util.register_dataclass(
         "closure_var",
         "level_rows",
         "select",
+        "multi_indices",
     ],
     meta_fields=[
         "n_params",
         "n_outputs",
         "dmax",
         "level_sizes",
+        "basis_family",
+        "table_degree",
         "input_codes",
         "output_codes",
         "direction",

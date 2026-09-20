@@ -109,7 +109,16 @@ class Warp:
 def _candidates(column: np.ndarray, allow_log: bool) -> list[tuple[str, str, float, float]]:
     """(pre, shape, param, centre) tuples to try for one axis."""
     out: list[tuple[str, str, float, float]] = [("identity", "identity", 0.0, 0.0)]
-    if allow_log and np.all(column > 0.0) and column.max() / column.min() > 10.0:
+    if allow_log and np.all(column > 0.0) and column.max() > column.min():
+        # Offered whenever it is defined, with no dynamic-range threshold. An
+        # earlier version required a range ratio above 10, which turned out to
+        # be strictly harmful: the gain from a log warp rises smoothly from 23x
+        # at a ratio of 2 to 691x at 10 with no break anywhere, so the
+        # threshold blocked it exactly where it paid. Nothing is needed on the
+        # other side, because `margin` already rejects a log that does not
+        # help: on a response polynomial in x rather than in log x, the scan
+        # returned identity at every ratio up to 1000, where the log warp would
+        # have made the held-out error 0.0220 against 0.0000.
         out.append(("log", "identity", 0.0, 0.0))
     for b in (1.0, 3.0, 10.0, 30.0):
         for c in (-0.5, 0.0, 0.5):

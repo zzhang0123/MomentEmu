@@ -117,11 +117,43 @@ def test_warps_stay_finite_outside_the_training_box(shape, param):
     assert np.isfinite(u).all()
 
 
-def test_log_needs_positive_values_and_a_wide_range():
+def test_log_needs_positive_values():
     rng = np.random.default_rng(0)
     X = rng.uniform(-1, 1, (3000, 2))                 # straddles zero
     Y = (X[:, 0] ** 2 + X[:, 1]).reshape(-1, 1)
     assert all(w.pre == "identity" for w in fit_warps(X, Y, random_state=0))
+
+
+def _log_target(ratio, n=6000, seed=0):
+    rng = np.random.default_rng(seed)
+    x0 = ratio ** rng.uniform(0, 1, n)
+    X = np.column_stack([x0] + [rng.uniform(-1, 1, n) for _ in range(3)])
+    t = np.log10(x0) / np.log10(ratio)
+    Y = (np.sin(3.0 * t) + 0.5 * X[:, 1] * X[:, 2] + 0.3 * X[:, 3]).reshape(-1, 1)
+    return X, Y
+
+
+@pytest.mark.parametrize("ratio", [3, 10, 100])
+def test_log_is_offered_at_any_dynamic_range(ratio):
+    """There is no threshold on the range ratio. An earlier version required
+    above 10, which blocked the warp exactly where it paid: the gain rises
+    smoothly from 23x at a ratio of 2 to 691x at 10, with no break."""
+    X, Y = _log_target(ratio)
+    assert fit_warps(X, Y, random_state=0)[0].pre == "log"
+
+
+@pytest.mark.parametrize("ratio", [10, 1000])
+def test_a_log_warp_that_does_not_help_is_still_rejected(ratio):
+    """Nothing is needed on the other side of the removed threshold, because
+    the evidence margin already rejects a useless log. Here the response is
+    polynomial in x rather than in log x, so log must not be chosen however
+    many decades the axis spans."""
+    rng = np.random.default_rng(0)
+    x0 = ratio ** rng.uniform(0, 1, 6000)
+    X = np.column_stack([x0] + [rng.uniform(-1, 1, 6000) for _ in range(3)])
+    u = (x0 - x0.min()) / (x0.max() - x0.min())
+    Y = (np.sin(3.0 * u) + 0.5 * X[:, 1] * X[:, 2] + 0.3 * X[:, 3]).reshape(-1, 1)
+    assert fit_warps(X, Y, random_state=0)[0].pre == "identity"
 
 
 def test_warped_emulator_beats_raw_coordinates():

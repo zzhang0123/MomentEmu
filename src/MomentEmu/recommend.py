@@ -373,9 +373,10 @@ def recommend(
             # SparseEmu builds its own candidate set and needs a degree for
             # it. Size it in the ORIGINAL dimension: a rotation only lowers
             # the dimension, so this stays affordable after preconditioning.
-            extra.setdefault(
-                "degree", _affordable_degree(X.shape[1], keep.size, scan_degree)
-            )
+            # The degree is deliberately NOT set here. Sizing the candidate
+            # set needs the dimension the chosen order leaves, which only
+            # PreconditionedEmu knows; sizing it in the original dimension
+            # wastes the headroom the rotation bought.
             extra.setdefault("n_terms", _sparse_size(keep.size))
         else:
             _enable_the_degree_climb(extra, scan_degree)
@@ -455,10 +456,6 @@ def recommend(
             if best["estimator"] == "factored":
                 extra["blocks"] = blocks
             elif best["estimator"] == "sparse":
-                extra.setdefault(
-                    "degree",
-                    _affordable_degree(X.shape[1], keep.size, scan_degree),
-                )
                 extra.setdefault("n_terms", _sparse_size(keep.size))
             elif best["estimator"] == "polynomial":
                 _enable_the_degree_climb(extra, scan_degree)
@@ -565,9 +562,6 @@ def recommend(
     if config["estimator"] == "factored":
         final["blocks"] = blocks
     elif config["estimator"] == "sparse":
-        final.setdefault(
-            "degree", _affordable_degree(X.shape[1], keep.size, scan_degree)
-        )
         final.setdefault("n_terms", _sparse_size(keep.size))
     elif config["estimator"] == "polynomial":
         if config["degree"] is not None:

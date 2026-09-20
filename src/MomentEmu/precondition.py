@@ -234,6 +234,10 @@ class PreconditionedEmu:
             dimensions with 24,562 rows it stops the degree at 11, although
             degree 12 needs 6,188 terms and the sample rule allows 18,564.
             When it is what binds, the warning says so by name.
+            It is also the ceiling on the candidate-set degree the sparse
+            estimator is given when the caller names neither ``degree`` nor
+            ``candidate``: that set is sized for the dimension the chosen
+            order leaves, not the one it started with.
         scan_terms: active-set size used when scoring orders under the sparse
             estimator, capped at the caller's own ``n_terms``.
 
@@ -427,6 +431,19 @@ class PreconditionedEmu:
             kwargs.pop("init_deg_forward", None)
             kwargs.pop("RMSE_tol", None)
             kwargs.pop("verbose", None)
+            if kwargs.get("candidate") is None and kwargs.get("degree") is None:
+                # Size the candidate set in the PRECONDITIONED dimension. Only
+                # this constructor knows it, because the order is chosen here,
+                # so a caller can only size the set in the original dimension.
+                # That is safe -- a rotation lowers the dimension, so a degree
+                # affordable before is affordable after -- but it throws away
+                # the headroom the rotation just bought: on 21cmGEM seven
+                # parameters afford degree 7 and the five rotated ones afford
+                # 12. The polynomial branch above already clamps its degree
+                # here for the same reason, in the other direction.
+                kwargs["degree"] = _affordable_degree(
+                    A.shape[1], X.shape[0], int(scan_degree)
+                )
             self.emulator = SparseEmu(A, Y, **kwargs)
         else:
             from MomentEmu.factored import FactoredEmu
